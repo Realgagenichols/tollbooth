@@ -74,4 +74,18 @@ policy:
       action: allow
       server: fs
 
+# DLP runs on every call (arguments) and result. Defaults: detections in
+# requests BLOCK the call; detections in results are REDACTED in place as
+# [REDACTED:pattern-id]. Override per pattern and direction below.
+dlp:
+  enabled: true
+  overrides:
+    # A leaked private key is unsalvageable context — drop the whole result.
+    private-key-pem:
+      results: block
+    # Example: a CRM that legitimately handles phone numbers.
+    # us-phone:
+    #   requests: allow
+    #   results: allow
+
 audit_log: ./tollbooth-audit.jsonl

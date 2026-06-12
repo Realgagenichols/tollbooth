@@ -5,14 +5,14 @@ A security gateway for AI agents: a transparent MCP proxy that enforces policy o
 **A firewall + DLP + audit layer for agentic AI tool traffic.**
 
 - **Policy engine** — declarative YAML rules over tool calls: `allow` / `deny` / `require-approval` by server, tool, and argument patterns (first match wins)
-- **Fail-closed** — an internal error blocks the call; fail-open is explicit opt-in
-- **Audit** — one structured JSONL event per decision; argument values never logged
-- **Coming (M2)** — DLP on agent traffic: block secrets/PAN/PII in requests, redact them in results
+- **DLP on agent traffic** — secrets, payment cards (Luhn-validated), and PII detected in both directions: requests carrying sensitive data are **blocked**, results are **redacted** in place
+- **Fail-closed** — an internal error blocks the call; a result that can't be redacted is withheld; fail-open is explicit opt-in
+- **Audit** — one structured JSONL event per decision; detected values never logged
 
 ## How it works
 
 ```
-MCP client ──▶ tollbooth (policy ▸ audit) ──▶ your real MCP servers
+MCP client ──▶ tollbooth (policy ▸ DLP ▸ audit) ──▶ your real MCP servers
 ```
 
 Your client config points at one server: tollbooth. Tollbooth launches the real upstream servers, exposes their tools namespaced as `{server}_{tool}`, and enforces policy on every call.
@@ -22,8 +22,10 @@ Your client config points at one server: tollbooth. Tollbooth launches the real 
 ```bash
 uv sync
 
-# 1. Write a gateway config (see examples/tollbooth.yaml)
-cp examples/tollbooth.yaml tollbooth.yaml
+# 1. Write a gateway config (see examples/tollbooth.yaml) — or bootstrap one
+#    from your existing client config:
+uv run tollbooth import ~/.claude/claude_desktop_config.json   # or .mcp.json
+cp examples/tollbooth.yaml tollbooth.yaml                      # ...or by hand
 
 # 2. Check it
 uv run tollbooth validate -c tollbooth.yaml
@@ -55,6 +57,38 @@ Rules are evaluated top-down; the first match decides. `require-approval` blocks
 
 > **Gotcha:** a rule with a `where:` block can only fire when that argument is present in the call. Negative matchers + `default: allow` can be bypassed by argument omission — prefer `default: deny` for guard configs.
 
+## DLP
+
+Enabled by default (`dlp.enabled: true`). Direction-aware: a detection in a tool call's **arguments blocks the call** (egress is the exfil path); a detection in a **result is redacted** in place as `[REDACTED:{pattern-id}]` so the agent keeps working. Dict keys and numeric values that would need redaction withhold the whole result instead — nothing sensitive passes because it arrived in an awkward shape.
+
+| Pattern id | Detects |
+|---|---|
+| `aws-access-key` | AWS access key IDs (`AKIA...`) |
+| `aws-secret-key` | AWS secret key assignments |
+| `github-token` | GitHub tokens (`ghp_`, `gho_`, ..., `github_pat_`) |
+| `private-key-pem` | PEM private keys (full block redacted, incl. `ENCRYPTED`) |
+| `connection-string` | DB URLs with credentials (`postgres://user:pass@...`) |
+| `api-key-assignment` | Generic `api_key=...` assignments |
+| `password-assignment` | `password:`/`passwd:`/`pwd=` assignments |
+| `pan` | Payment cards (Visa/MC incl. 2-series/Amex/Discover), Luhn-validated |
+| `ssn` | US Social Security Numbers |
+| `us-phone` | US phone numbers (separators required) |
+
+Override per pattern and direction:
+
+```yaml
+dlp:
+  enabled: true
+  overrides:
+    private-key-pem:
+      results: block       # withhold the whole result instead of redacting
+    us-phone:
+      requests: allow      # this CRM legitimately sends phone numbers
+      results: allow
+```
+
+Request actions: `block` (default) | `allow`. Result actions: `redact` (default) | `block` | `allow`. Unknown pattern ids or actions fail validation at startup.
+
 ## Audit log
 
 Set `audit_log: ./tollbooth-audit.jsonl` for one JSON event per decision:
@@ -63,7 +97,7 @@ Set `audit_log: ./tollbooth-audit.jsonl` for one JSON event per decision:
 {"ts": "2026-06-12T10:00:00+00:00", "path": "request", "server": "fs", "tool": "write_file", "decision": "deny", "reason_id": "block-writes-outside-project"}
 ```
 
-Decisions made because a security check was skipped (fail-open) are tagged `fail-open:<stage>` — the audit trail never hides a degraded state.
+DLP decisions are audited by pattern id, never value: a blocked request logs `"reason_id": "dlp:pan"`, a redacted result logs `"reason_id": "redacted:aws-access-key"`. Decisions made because a security check was skipped (fail-open) are tagged `fail-open:<stage>` — the audit trail never hides a degraded state.
 
 ## Development
 
@@ -71,5 +105,3 @@ Decisions made because a security check was skipped (fail-open) are tagged `fail
 uv run pytest          # full suite, incl. a real-subprocess gateway E2E
 uv run ruff check .    # lint
 ```
-
-Requirements and design live in `SPEC.md` (RFC 2119 + Given/When/Then scenarios); design rationale in `docs/design/gateway-design.md`.
