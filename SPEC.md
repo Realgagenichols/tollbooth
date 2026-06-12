@@ -186,7 +186,7 @@ The system MAY additionally proxy upstream servers that speak streamable HTTP, b
 <!-- Milestone-sized project. tasks/todo.md holds ONLY the active milestone's tasks.
      v1 release boundary = M1 + M2: M1 is built and proven end-to-end first,
      but v1 is not announced/tagged until M2 (DLP) lands. -->
-- [ ] **M1: Proxy core + policy engine** — R1, R2, R3, R4, R5, S1
+- [x] **M1: Proxy core + policy engine** — R1, R2, R3, R4, R5, S1 *(completed 2026-06-12: 76 tests, live Claude Code acceptance)*
 - [ ] **M2: DLP on agent traffic** — R6, R7 (patterns ported from claude-dlp-guard). Completes the v1 release; S2 if capacity allows.
 - [ ] **M3: Audit log + session replay** — tamper-evident, queryable log of every call/result; maps to SOC 2 logging controls
 - [ ] **M4: Pluggable interceptor API + Claude Code adapter** — formal plugin interface (incl. prompt-injection detectors), plus a Claude Code hook adapter
