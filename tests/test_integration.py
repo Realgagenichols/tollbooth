@@ -16,7 +16,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from tests.conftest import ECHO_SERVER
-from tests.test_proxy import fs_upstream, github_upstream
+from tests.test_proxy import FakeUpstream, fs_upstream, github_upstream
 from tollbooth.audit import AuditLogger
 from tollbooth.config import load_config
 from tollbooth.main import build_gateway
@@ -140,7 +140,7 @@ audit_log: {audit_path}
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
         listed = await session.list_tools()
-        assert {t.name for t in listed.tools} == {"echo_echo", "echo_shout"}
+        assert {t.name for t in listed.tools} == {"echo_echo", "echo_shout", "echo_leak"}
 
         allowed = await session.call_tool("echo_echo", {"text": "hi"})
         assert allowed.isError is False
@@ -150,5 +150,104 @@ audit_log: {audit_path}
         assert denied.isError is True
         assert "no-shouting" in denied.content[0].text
 
-    events = [json.loads(line) for line in audit_path.read_text().splitlines()]
-    assert [e["decision"] for e in events] == ["allow", "deny"]
+        # M2 acceptance: secret-bearing result arrives redacted over real stdio
+        leaked = await session.call_tool("echo_leak", {})
+        assert leaked.isError is False
+        assert "AKIAIOSFODNN7EXAMPLE" not in leaked.content[0].text
+        assert "[REDACTED:aws-access-key]" in leaked.content[0].text
+
+        # M2 acceptance: PAN in request args blocked before reaching upstream
+        blocked = await session.call_tool("echo_echo", {"text": "card 4111111111111111"})
+        assert blocked.isError is True
+        assert "pan" in blocked.content[0].text
+        assert "4111111111111111" not in blocked.content[0].text
+
+    audit_text = audit_path.read_text()
+    events = [json.loads(line) for line in audit_text.splitlines()]
+    # leak emits TWO redaction events: FastMCP returns the secret in both the
+    # text block and structuredContent, and each surface is scanned (R7).
+    assert [e["decision"] for e in events] == ["allow", "deny", "allow", "allow", "allow", "deny"]
+    assert events[3]["reason_id"] == "redacted:aws-access-key"
+    assert events[4]["reason_id"] == "redacted:aws-access-key"
+    assert events[5]["reason_id"] == "dlp:pan"
+    assert "4111111111111111" not in audit_text
+    assert "AKIAIOSFODNN7EXAMPLE" not in audit_text
+
+
+DLP_CONFIG = """
+servers:
+  fs:
+    command: unused-here
+policy:
+  default: allow
+"""
+
+
+async def test_full_stack_dlp_redaction_and_blocking(tmp_path):
+    """R6+R7+S1 in-memory full stack: result redacted, request blocked,
+    both audited by pattern id without values."""
+    config_path = tmp_path / "tollbooth.yaml"
+    config_path.write_text(DLP_CONFIG, encoding="utf-8")
+    audit_stream = io.StringIO()
+    gateway = build_gateway(load_config(config_path), audit_stream=audit_stream)
+    fs = FakeUpstream(
+        "fs", {"read_file": lambda args: f"aws_key=AKIAIOSFODNN7EXAMPLE in {args['path']}"}
+    )
+    gateway.upstreams = {"fs": fs}
+
+    async with create_connected_server_and_client_session(gateway.server) as client:
+        redacted = await client.call_tool("fs_read_file", {"path": "/app/.env"})
+        blocked = await client.call_tool(
+            "fs_read_file", {"path": "/notes/card-4111111111111111.txt"}
+        )
+
+    assert redacted.isError is False
+    assert redacted.content[0].text == "aws_key=[REDACTED:aws-access-key] in /app/.env"
+    assert blocked.isError is True
+    assert "pan" in blocked.content[0].text
+    # The blocked call never reached the upstream (egress stopped at the gate).
+    assert len(fs.calls) == 1
+
+    audit_text = audit_stream.getvalue()
+    assert "AKIAIOSFODNN7EXAMPLE" not in audit_text
+    assert "4111111111111111" not in audit_text
+    events = [json.loads(line) for line in audit_text.splitlines()]
+    assert events[1]["reason_id"] == "redacted:aws-access-key"
+    assert events[2]["reason_id"] == "dlp:pan"
+
+
+async def test_concurrent_calls_no_redaction_bleed(tmp_path):
+    """Cross-cutting Pattern 8: 20 concurrent DLP-scanned calls through one
+    gateway — every response redacts its own content, no cross-call mixups."""
+    import anyio
+
+    config_path = tmp_path / "tollbooth.yaml"
+    config_path.write_text(DLP_CONFIG, encoding="utf-8")
+    gateway = build_gateway(load_config(config_path), audit_stream=io.StringIO())
+    gateway.upstreams = {
+        "fs": FakeUpstream(
+            "fs",
+            {
+                "read_file": lambda args: (
+                    f"file {args['n']}: ssn 123-45-6789"
+                    if args["secret"]
+                    else f"file {args['n']}: clean"
+                )
+            },
+        )
+    }
+
+    results: dict[int, str] = {}
+    async with create_connected_server_and_client_session(gateway.server) as client:
+
+        async def call(n: int):
+            result = await client.call_tool("fs_read_file", {"n": n, "secret": n % 2 == 0})
+            results[n] = result.content[0].text
+
+        async with anyio.create_task_group() as tg:
+            for n in range(20):
+                tg.start_soon(call, n)
+
+    for n in range(20):
+        expected = f"file {n}: ssn [REDACTED:ssn]" if n % 2 == 0 else f"file {n}: clean"
+        assert results[n] == expected

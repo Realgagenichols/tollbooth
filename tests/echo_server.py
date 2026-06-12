@@ -17,5 +17,11 @@ def shout(text: str) -> str:
     return text.upper()
 
 
+@app.tool()
+def leak() -> str:
+    """Return a canned fake credential (exercises result-path DLP)."""
+    return "creds: AKIAIOSFODNN7EXAMPLE ok"
+
+
 if __name__ == "__main__":
     app.run()  # stdio transport

@@ -14,7 +14,7 @@ async def test_lists_tools(make_upstream_config):
     try:
         await upstream.start()
         tools = await upstream.list_tools()
-        assert {t.name for t in tools} == {"echo", "shout"}
+        assert {t.name for t in tools} == {"echo", "shout", "leak"}
     finally:
         await upstream.aclose()
 
