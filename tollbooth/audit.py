@@ -148,10 +148,15 @@ def _read_events(path: str | Path) -> list[dict]:
 
 
 def _event_ts(event: dict) -> datetime | None:
+    """Best-effort event timestamp. The log is external input even though we
+    wrote it: a naive ts (foreign tool, tampering) is normalized to UTC so
+    time filters can't crash; unparseable ts → None (excluded by filters —
+    verify_chain is the integrity backstop)."""
     try:
-        return datetime.fromisoformat(event["ts"])
+        ts = datetime.fromisoformat(event["ts"])
     except (KeyError, TypeError, ValueError):
         return None
+    return ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
 
 
 def _as_utc(bound: datetime) -> datetime:
@@ -171,7 +176,8 @@ def query_events(
 ) -> list[dict]:
     """Filter audit events (R11). Field filters are exact matches; events
     lacking a filtered field (e.g. session-start has no decision) are excluded
-    by that filter. since/until are inclusive."""
+    by that filter. since/until are inclusive; events without a parseable ts
+    are excluded by time filters — run `audit verify` for integrity."""
     matched = []
     for event in _read_events(path):
         if server is not None and event.get("server") != server:
@@ -194,26 +200,37 @@ def query_events(
     return matched
 
 
+# Escape C0 controls + DEL in rendered fields: tool names and (full-mode)
+# content are upstream-controlled, and replay is read mid-incident — raw
+# ANSI/newlines could fabricate or hide timeline lines (section-4 review).
+_CONTROL_ESCAPES = {c: f"\\x{c:02x}" for c in (*range(0x20), 0x7F)}
+
+
+def _safe(value: object) -> str:
+    return str(value).translate(_CONTROL_ESCAPES)
+
+
 def _render_event(event: dict) -> list[str]:
-    ts = event.get("ts", "?")
+    ts = _safe(event.get("ts", "?"))
     kind = event.get("event", "?")
     if kind == "session-start":
-        version = event.get("gateway_version", "?")
-        digest = str(event.get("config_digest", "?"))
+        version = _safe(event.get("gateway_version", "?"))
+        digest = _safe(event.get("config_digest", "?"))
         return [f"{ts}  session started — gateway {version}, config {digest[:12]}…"]
-    target = f"{event.get('server', '?')}/{event.get('tool', '?')}"
+    target = f"{_safe(event.get('server', '?'))}/{_safe(event.get('tool', '?'))}"
     reason = event.get("reason_id")
-    suffix = f" ({reason})" if reason else ""
+    suffix = f" ({_safe(reason)})" if reason else ""
     call_id = event.get("call_id")
-    call = f" [call {str(call_id)[:8]}]" if call_id else ""
+    call = f" [call {_safe(str(call_id)[:8])}]" if call_id else ""
     lines = [
-        f"{ts}  {event.get('path', '?'):7s} {target} → "
-        f"{event.get('decision', '?')}{suffix}{call}"
+        f"{ts}  {_safe(event.get('path', '?')):7s} {target} → "
+        f"{_safe(event.get('decision', '?'))}{suffix}{call}"
     ]
     if "args" in event:
+        # json.dumps escapes all C0 controls on its own.
         lines.append(f"        args: {json.dumps(event['args'], ensure_ascii=False)}")
     if "content" in event:
-        lines.append(f"        content: {event['content']}")
+        lines.append(f"        content: {_safe(event['content'])}")
     return lines
 
 

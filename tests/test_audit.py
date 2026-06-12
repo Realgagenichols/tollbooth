@@ -710,3 +710,56 @@ class TestQueryAndReplay:
         self.write_mixed_log(log)
         with pytest.raises(AuditError, match="no events"):
             replay_session(log, "doesnotexist")
+
+
+class TestReaderHardening:
+    """Section-4 review: readers must not assume writer-side invariants."""
+
+    @pytest.mark.regression
+    def test_naive_event_ts_does_not_crash_time_filters(self, tmp_path):
+        from datetime import datetime
+
+        from tollbooth.audit import query_events
+
+        log = tmp_path / "audit.jsonl"
+        log.write_text(
+            '{"seq": 0, "prev": "genesis", "ts": "2026-01-01T00:00:00", '
+            '"server": "s", "tool": "t", "decision": "allow"}\n',
+            encoding="utf-8",
+        )
+        since = datetime.fromisoformat("2020-01-01T00:00:00+00:00")
+        assert len(query_events(log, since=since)) == 1  # naive ts treated as UTC
+
+    @pytest.mark.regression
+    def test_replay_escapes_control_chars_from_upstream_fields(self, tmp_path):
+        from tollbooth.audit import AuditLogger, replay_session
+
+        log = tmp_path / "audit.jsonl"
+        with open(log, "w", encoding="utf-8") as handle:
+            logger = AuditLogger(handle, record="full")
+            logger.decision(
+                path="result",
+                server="bad\nserver",
+                tool="evil\x1b[2Jtool",
+                decision="allow",
+                reason_id=None,
+                call_id="c1",
+                content="wipe\x1b[2J\x1b[H\nFAKE 2026 request fs/read -> allow",
+            )
+        text = replay_session(log, logger.session_id)
+        assert "\x1b" not in text  # no raw ANSI escapes reach the terminal
+        assert "bad\\x0aserver" in text  # newline rendered as escape, not a line break
+        # content cannot fabricate a timeline line of its own
+        assert not any(line.startswith("FAKE") for line in text.splitlines())
+
+    def test_query_session_filter_ignores_payload_values(self, tmp_path):
+        from tollbooth.audit import AuditLogger, query_events
+
+        log = tmp_path / "audit.jsonl"
+        with open(log, "w", encoding="utf-8") as handle:
+            logger = AuditLogger(handle, record="full")
+            logger.decision(
+                path="request", server="s", tool="t", decision="allow",
+                reason_id=None, args={"note": "session-imposter"},
+            )
+        assert query_events(log, session="session-imposter") == []
