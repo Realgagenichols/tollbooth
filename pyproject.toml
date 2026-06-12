@@ -3,7 +3,11 @@ name = "tollbooth"
 version = "0.1.0"
 description = "A security gateway for AI agents: a transparent MCP proxy that enforces policy, DLP, and audit on every tool call and result."
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "mcp>=1.27.2",
+    "pydantic>=2.13.4",
+    "pyyaml>=6.0.3",
+]
 
 [project.scripts]
 tollbooth = "tollbooth.main:main"
@@ -16,6 +20,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = [
     "regression: tests for previously caught bugs",
 ]
