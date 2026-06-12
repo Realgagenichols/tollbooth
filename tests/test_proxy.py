@@ -383,3 +383,80 @@ class TestStructuredContent:
             result = await client.call_tool("api_fetch", {})
         assert result.isError is False
         assert result.structuredContent["db"] == "[REDACTED:connection-string]"
+
+
+class EmbeddedFake:
+    """Upstream double returning an EmbeddedResource content block."""
+
+    def __init__(self, resource):
+        self.name = "docs"
+        self.resource = resource
+
+    async def start(self):
+        pass
+
+    async def list_tools(self):
+        return [
+            types.Tool(name="fetch", inputSchema={"type": "object", "additionalProperties": True})
+        ]
+
+    async def call_tool(self, tool, args):
+        return types.CallToolResult(
+            content=[types.EmbeddedResource(type="resource", resource=self.resource)],
+            isError=False,
+        )
+
+    async def aclose(self):
+        pass
+
+
+class TestEmbeddedResources:
+    # R12 scenario: secret in embedded text resource is redacted
+    async def test_secret_in_embedded_text_redacted(self):
+        fake = EmbeddedFake(
+            types.TextResourceContents(
+                uri="file:///tmp/creds.txt",
+                mimeType="text/plain",
+                text="key AKIAIOSFODNN7EXAMPLE end",
+            )
+        )
+        gateway = make_dlp_gateway(fake)
+        async with create_connected_server_and_client_session(gateway.server) as client:
+            result = await client.call_tool("docs_fetch", {})
+        assert result.isError is False
+        [block] = result.content
+        assert block.resource.text == "key [REDACTED:aws-access-key] end"
+        assert str(block.resource.uri) == "file:///tmp/creds.txt"  # rest intact
+
+    # R12 scenario: per-pattern block override withholds the result
+    async def test_block_override_withholds_embedded_result(self):
+        from tollbooth.dlp import DlpResultInterceptor
+
+        pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"
+        fake = EmbeddedFake(
+            types.TextResourceContents(uri="file:///tmp/id_rsa", text=pem)
+        )
+        pipeline = Pipeline(
+            request_interceptors=[PolicyInterceptor(rules=[], default=Decision.ALLOW)],
+            result_interceptors=[DlpResultInterceptor({"private-key-pem": "block"})],
+        )
+        gateway = Gateway(upstreams={fake.name: fake}, pipeline=pipeline)
+        async with create_connected_server_and_client_session(gateway.server) as client:
+            result = await client.call_tool("docs_fetch", {})
+        assert result.isError is True
+        message = result.content[0].text
+        assert "private-key-pem" in message
+        assert "BEGIN RSA" not in message  # never echo the detected content
+
+    # R12 scenario: blob resource passes through (never scan base64 — Pattern 12)
+    async def test_blob_resource_passes_through_unmodified(self):
+        blob = types.BlobResourceContents(
+            uri="file:///tmp/blob.bin", blob="QUtJQUlPU0ZPRE5ON0VYQU1QTEU="
+        )
+        fake = EmbeddedFake(blob)
+        gateway = make_dlp_gateway(fake)
+        async with create_connected_server_and_client_session(gateway.server) as client:
+            result = await client.call_tool("docs_fetch", {})
+        assert result.isError is False
+        [block] = result.content
+        assert block.resource.blob == "QUtJQUlPU0ZPRE5ON0VYQU1QTEU="

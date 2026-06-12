@@ -141,10 +141,20 @@ class Gateway:
                 if verdict.decision is not Decision.ALLOW or verdict.content is None:
                     return _error_result(verdict.message)
                 processed.append(block.model_copy(update={"text": verdict.content}))
+            elif isinstance(block, types.EmbeddedResource) and isinstance(
+                block.resource, types.TextResourceContents
+            ):
+                # R12: embedded text resources get the same redact/withhold
+                # semantics as text blocks.
+                verdict = self.pipeline.process_result(call, block.resource.text)
+                if verdict.decision is not Decision.ALLOW or verdict.content is None:
+                    return _error_result(verdict.message)
+                resource = block.resource.model_copy(update={"text": verdict.content})
+                processed.append(block.model_copy(update={"resource": resource}))
             else:
-                # Non-text blocks (images, EmbeddedResource) pass through
-                # unscanned in v1; EmbeddedResource text lands with M3's
-                # resource scanning (SPEC out-of-scope note).
+                # Images and binary (blob) resources pass through unscanned:
+                # scanning a base64 form would bypass raw-form detectors
+                # (Pattern 12) — documented limitation (R12).
                 processed.append(block)
         structured = result.structuredContent
         if structured is not None:
