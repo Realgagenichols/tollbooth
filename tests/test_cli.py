@@ -185,6 +185,22 @@ class TestRunWiring:
             _open_audit_stream(config, stack)
 
 
+class TestAuditWiring:
+    def test_build_gateway_passes_record_mode(self, tmp_path):
+        import io
+
+        from tollbooth.config import load_config
+        from tollbooth.main import build_gateway
+
+        config_path = tmp_path / "tollbooth.yaml"
+        config_path.write_text(
+            "servers:\n  fs:\n    command: /bin/echo\naudit:\n  record: full\n",
+            encoding="utf-8",
+        )
+        gateway = build_gateway(load_config(config_path), audit_stream=io.StringIO())
+        assert gateway.pipeline.audit.records_content is True
+
+
 class TestAuditVerify:
     """R8: `tollbooth audit verify` validates the chain from the CLI."""
 
