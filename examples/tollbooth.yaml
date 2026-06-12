@@ -1,0 +1,77 @@
+# tollbooth example config — exercises every matcher type.
+#
+# Layout:
+#   servers:   upstream MCP servers the gateway launches and wraps
+#   policy:    ordered rules (first match wins) + default + failure mode
+#   audit_log: JSONL decision log (omit to log to stderr)
+#
+# IMPORTANT: a rule with a `where:` block can only fire when the argument
+# field is PRESENT in the call. Negative matchers (not_prefix) combined with
+# `default: allow` are bypassable by argument omission — pair guard rules
+# with `default: deny` (as below) or add a catch-all rule.
+
+servers:
+  fs:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/project"]
+  shell:
+    command: my-shell-mcp-server
+    env:
+      SHELL_TIMEOUT: "30"
+
+policy:
+  # Applied when no rule matches. `deny` = allowlist posture (recommended).
+  default: deny
+  # `closed` (default): an internal error blocks the call. `open`: logs and
+  # continues — only set this if availability beats enforcement for you.
+  failure_mode: closed
+
+  rules:
+    # equals — exact match on an argument field
+    - name: allow-project-status
+      action: allow
+      server: shell
+      tool: exec
+      where:
+        command:
+          equals: "git status"
+
+    # prefix — allow reads inside the project only
+    - name: allow-project-reads
+      action: allow
+      server: fs
+      tool: read_file
+      where:
+        path:
+          prefix: /Users/me/project
+
+    # not_prefix — deny writes that escape the project directory
+    - name: block-writes-outside-project
+      action: deny
+      server: fs
+      tool: write_file
+      where:
+        path:
+          not_prefix: /Users/me/project
+
+    # regex — block curl-pipe-shell patterns anywhere in a command
+    - name: no-curl-pipe-sh
+      action: deny
+      server: shell
+      tool: exec
+      where:
+        command:
+          regex: "curl.*\\|\\s*sh"
+
+    # require-approval — blocked with an approvable message (distinct from deny)
+    - name: shell-needs-approval
+      action: require-approval
+      server: shell
+      tool: "*"
+
+    # wildcard allow — everything else on fs (reads, lists, ...)
+    - name: allow-fs-rest
+      action: allow
+      server: fs
+
+audit_log: ./tollbooth-audit.jsonl
