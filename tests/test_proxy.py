@@ -229,6 +229,31 @@ async def test_concurrent_calls_no_cross_talk():
     assert results == {n: f"reply-{n}" for n in range(20)}
 
 
+# Pattern 8 / R8: concurrent calls must not corrupt the hash chain
+@pytest.mark.regression
+async def test_concurrent_calls_leave_verifiable_chain(tmp_path):
+    from tollbooth.audit import AuditLogger, verify_chain
+
+    echo = FakeUpstream("echo", {"echo": lambda args: "ok"})
+    log_path = tmp_path / "audit.jsonl"
+    with open(log_path, "w", encoding="utf-8") as stream:
+        pipeline = Pipeline(
+            request_interceptors=[PolicyInterceptor(rules=[], default=Decision.ALLOW)],
+            audit=AuditLogger(stream),
+        )
+        gateway = Gateway(upstreams={"echo": echo}, pipeline=pipeline)
+        async with (
+            create_connected_server_and_client_session(gateway.server) as client,
+            anyio.create_task_group() as tg,
+        ):
+            for n in range(20):
+                tg.start_soon(client.call_tool, "echo_echo", {"n": n})
+
+    head = verify_chain(log_path)
+    assert head.events == 20
+    assert head.seq == 19
+
+
 # R9 scenario: concurrent calls carry distinct call ids
 async def test_concurrent_calls_get_distinct_call_ids():
     import io
