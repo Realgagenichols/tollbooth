@@ -25,6 +25,17 @@ SCHEMA_VERSION = 2
 GENESIS = "genesis"
 
 
+def _split_lines(text: str) -> list[str]:
+    """Frame events on '\\n' ONLY — the writer's framing. str.splitlines()
+    also splits on U+2028/U+2029/U+0085, which json.dumps(ensure_ascii=False)
+    leaves raw inside strings, so an upstream-controlled value containing one
+    would make a self-written log unverifiable (section-2 review finding)."""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()  # trailing newline, not an empty record
+    return lines
+
+
 class AuditError(Exception):
     """Audit trail problem (unreadable/invalid log). Messages carry the path
     and location, never line contents — a log fed back to us is external
@@ -41,7 +52,7 @@ def tail_state(path: str | Path) -> tuple[int, str] | None:
         return None
     except OSError as exc:
         raise AuditError(f"cannot read audit log {path}: {exc}") from exc
-    lines = text.splitlines()
+    lines = _split_lines(text)
     if not lines:
         return None
     last = lines[-1]
@@ -82,7 +93,7 @@ def verify_chain(path: str | Path, key: bytes | None = None) -> ChainHead:
 
     prev = GENESIS
     expected_seq = 0
-    lines = text.splitlines()
+    lines = _split_lines(text)
     for lineno, line in enumerate(lines, start=1):
         try:
             event = json.loads(line)

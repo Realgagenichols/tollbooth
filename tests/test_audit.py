@@ -440,6 +440,30 @@ class TestVerifyChain:
         assert "line 3" in str(excinfo.value)
         assert "sentinel-not-json" not in str(excinfo.value)
 
+    @pytest.mark.regression
+    def test_unicode_line_separators_in_values_do_not_break_framing(self, tmp_path):
+        """U+2028/U+2029/U+0085 pass through json.dumps(ensure_ascii=False)
+        raw; framing must be '\\n'-only or a self-written log fails verify."""
+        from tollbooth.audit import tail_state, verify_chain
+
+        log_path = tmp_path / "audit.jsonl"
+        with open(log_path, "w", encoding="utf-8") as handle:
+            logger = AuditLogger(handle)
+            logger.decision(
+                path="request",
+                server="s",
+                tool="evil\u2028tool\u2029name\u0085x",
+                decision="deny",
+                reason_id=None,
+            )
+            logger.decision(
+                path="request", server="s", tool="ok", decision="allow", reason_id=None
+            )
+        head = verify_chain(log_path)
+        assert head.events == 2
+        seq, _last = tail_state(log_path)
+        assert seq == 1
+
     def test_empty_log_verifies_as_zero_events(self, tmp_path):
         from tollbooth.audit import verify_chain
 
