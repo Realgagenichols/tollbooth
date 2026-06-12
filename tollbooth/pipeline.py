@@ -9,6 +9,7 @@ import logging
 from dataclasses import dataclass
 from typing import Protocol
 
+from tollbooth.audit import AuditLogger
 from tollbooth.policy import Decision, PolicyResult, Rule, evaluate
 
 log = logging.getLogger(__name__)
@@ -86,10 +87,22 @@ class Pipeline:
         request_interceptors: list[RequestInterceptor] | None = None,
         result_interceptors: list[ResultInterceptor] | None = None,
         fail_open: bool = False,
+        audit: AuditLogger | None = None,
     ):
         self.request_interceptors = request_interceptors or []
         self.result_interceptors = result_interceptors or []
         self.fail_open = fail_open
+        self.audit = audit
+
+    def _audit(self, path: str, call: ToolCall, decision: Decision, reason_id: str | None):
+        if self.audit is not None:
+            self.audit.decision(
+                path=path,
+                server=call.server,
+                tool=call.tool,
+                decision=str(decision),
+                reason_id=reason_id,
+            )
 
     def _on_failure(self, stage_name: str, call: ToolCall, exc: Exception) -> bool:
         """Log a stage failure; return True if processing may continue (fail-open)."""
@@ -108,12 +121,16 @@ class Pipeline:
         return self.fail_open
 
     def evaluate_request(self, call: ToolCall) -> PolicyResult:
+        allow_reason: str | None = None  # rule that allowed, if any (for audit)
         for interceptor in self.request_interceptors:
             try:
                 result = interceptor.check_request(call)
             except Exception as exc:
                 if self._on_failure(interceptor.name, call, exc):
                     continue
+                self._audit(
+                    "request", call, Decision.DENY, f"interceptor-failure:{interceptor.name}"
+                )
                 return PolicyResult(
                     decision=Decision.DENY,
                     rule_name=None,
@@ -123,10 +140,14 @@ class Pipeline:
                     ),
                 )
             if result.decision is not Decision.ALLOW:
+                self._audit("request", call, result.decision, result.rule_name)
                 return result
+            if result.rule_name is not None:
+                allow_reason = result.rule_name
+        self._audit("request", call, Decision.ALLOW, allow_reason)
         return PolicyResult(
             decision=Decision.ALLOW,
-            rule_name=None,
+            rule_name=allow_reason,
             message=f"tollbooth: {call.server}/{call.tool} allowed.",
         )
 
@@ -136,6 +157,7 @@ class Pipeline:
                 content = interceptor.check_result(call, content)
             except BlockResult as block:
                 # Intentional verdict — honored regardless of fail_open.
+                self._audit("result", call, Decision.DENY, block.reason_id)
                 return ResultVerdict(
                     decision=Decision.DENY,
                     content=None,
@@ -147,6 +169,9 @@ class Pipeline:
             except Exception as exc:
                 if self._on_failure(interceptor.name, call, exc):
                     continue
+                self._audit(
+                    "result", call, Decision.DENY, f"interceptor-failure:{interceptor.name}"
+                )
                 return ResultVerdict(
                     decision=Decision.DENY,
                     content=None,
