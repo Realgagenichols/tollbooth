@@ -108,6 +108,16 @@ servers:
         assert "ghp_supersecret123" not in message
         assert "servers.gh.envv" in message  # location stays actionable
 
+    @pytest.mark.regression
+    def test_yaml_error_never_echoes_source_snippet(self, tmp_path):
+        """PyYAML marks embed the offending source line — secrets must not leak."""
+        bad = "servers:\n  gh:\n    command: x\n    env: {GITHUB_TOKEN: ghp_yamlsecret456\n"
+        with pytest.raises(ConfigError, match="YAML") as excinfo:
+            load_config(write_config(tmp_path, bad))
+        message = str(excinfo.value)
+        assert "ghp_yamlsecret456" not in message
+        assert "line " in message  # coordinates stay actionable
+
 
 class TestEmitClientConfig:
     # R3 scenario: emit client config

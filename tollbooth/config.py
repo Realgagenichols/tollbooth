@@ -13,6 +13,18 @@ class ConfigError(Exception):
     """Raised for any configuration problem; message is user-facing."""
 
 
+def _yaml_error_detail(exc: yaml.YAMLError) -> str:
+    """Describe a YAML error without its source snippet (which may hold secrets)."""
+    if not isinstance(exc, yaml.MarkedYAMLError):
+        return "syntax error"
+    parts = [text for text in (exc.context, exc.problem) if text]
+    mark = exc.problem_mark
+    if mark is not None:
+        # Coordinates only — str(mark) would pull in the source snippet.
+        parts.append(f"(line {mark.line + 1}, column {mark.column + 1})")
+    return " ".join(parts) or "syntax error"
+
+
 class UpstreamConfig(BaseModel):
     """Launch spec for one upstream stdio MCP server."""
 
@@ -49,7 +61,9 @@ def load_config(path: str | Path) -> GatewayConfig:
     try:
         raw = yaml.safe_load(raw_text)
     except yaml.YAMLError as exc:
-        raise ConfigError(f"malformed YAML in {path}: {exc}") from exc
+        # Never interpolate the exception itself: PyYAML marks embed a snippet
+        # of the offending source line, which may contain secrets.
+        raise ConfigError(f"malformed YAML in {path}: {_yaml_error_detail(exc)}") from exc
 
     if not isinstance(raw, dict):
         raise ConfigError(f"malformed YAML in {path}: top level must be a mapping")
