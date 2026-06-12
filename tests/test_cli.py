@@ -69,6 +69,7 @@ class TestEmitConfig:
         assert code == 0
         emitted = json.loads(capsys.readouterr().out)
         assert set(emitted["mcpServers"]) == {"tollbooth"}
+        assert emitted["mcpServers"]["tollbooth"]["command"].endswith("tollbooth")
         assert emitted["mcpServers"]["tollbooth"]["args"] == [
             "run",
             "-c",

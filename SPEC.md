@@ -250,24 +250,24 @@ client ◀──result──── proxy ◀── [result pipeline: dlp-result]
 
 ### Scenario Coverage
 Each requirement scenario above maps to at least one test case. Policy and DLP engines are tested pure (no I/O); the proxy is tested against a fake in-process MCP server.
-- [ ] R1 scenarios → `test_proxy.py`
-- [ ] R2 scenarios → `test_policy.py`
-- [ ] R3 scenarios → `test_config.py`
-- [ ] R4 scenarios → `test_pipeline.py`
-- [ ] R5 scenarios → `test_policy.py` / `test_proxy.py`
+- [x] R1 scenarios → `test_proxy.py`, `test_upstream.py`
+- [x] R2 scenarios → `test_policy.py`, `test_proxy.py`
+- [x] R3 scenarios → `test_config.py`, `test_cli.py`
+- [x] R4 scenarios → `test_pipeline.py`, `test_integration.py`
+- [x] R5 scenarios → `test_policy.py` / `test_proxy.py`
 - [ ] R6 scenarios → `test_dlp.py` (M2)
 - [ ] R7 scenarios → `test_dlp.py` / `test_pipeline.py` (M2)
-- [ ] S1 scenarios → `test_audit.py`
+- [x] S1 scenarios → `test_audit.py`, `test_integration.py`
 - [ ] S2 scenarios → `test_config.py` (M2)
 
 ### Regression Patterns
 From `~/.claude/lessons/cross-cutting.md` (each gets at least one test):
-- [ ] Pattern 1 — overlapping DLP detections: input matching both a specific and generic pattern yields only the specific one (R6 scenario)
-- [ ] Pattern 2 — false-positive corpus: Luhn-invalid 16-digit numbers, UUIDs that resemble keys, benign paths superficially matching deny patterns — asserted NOT flagged/blocked
-- [ ] Pattern 6 — fail-fast at boundaries: malformed JSON-RPC, upstream crash mid-call, invalid config produce clear errors, not silent pass-through; a crashing interceptor yields deny (R4)
-- [ ] Pattern 7 — non-ASCII tool arguments are matched, redacted, and logged correctly
-- [ ] Pattern 8 — concurrent tool calls through one gateway: no cross-call state corruption
-- [ ] Pattern 9 — `pythonpath = ["."]` under `[tool.pytest.ini_options]` from the start; reinstall before CLI smoke tests
+- [ ] Pattern 1 — overlapping DLP detections: input matching both a specific and generic pattern yields only the specific one (R6 scenario, M2)
+- [x] Pattern 2 — false-positive corpus: benign paths superficially matching deny patterns asserted NOT blocked (`test_policy.py`); Luhn corpus lands with DLP (M2)
+- [x] Pattern 6 — fail-fast at boundaries: invalid config, upstream crash, crashing interceptor → clear errors / deny, never silent pass-through
+- [x] Pattern 7 — non-ASCII (composed vs decomposed) tool arguments match correctly
+- [x] Pattern 8 — 20 concurrent tool calls through one gateway: no cross-call corruption; audit writes lock-serialized
+- [x] Pattern 9 — `pythonpath = ["."]` set; CLI smoke-tested after reinstall
 
 ### Acceptance Criteria
 - [ ] All scenario tests pass

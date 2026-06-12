@@ -126,5 +126,15 @@ class TestEmitClientConfig:
         client = emit_client_config(path)
         assert set(client["mcpServers"]) == {"tollbooth"}
         entry = client["mcpServers"]["tollbooth"]
-        assert entry["command"] == "tollbooth"
+        assert entry["command"].endswith("tollbooth")
         assert entry["args"] == ["run", "-c", str(path.resolve())]
+
+    @pytest.mark.regression
+    def test_emitted_command_is_absolute_when_running_from_venv(self, monkeypatch, tmp_path):
+        """MCP clients have a minimal PATH: emit the real binary path, not a bare name."""
+        fake_bin = tmp_path / "tollbooth"
+        fake_bin.touch()
+        monkeypatch.setattr("sys.argv", [str(fake_bin)])
+        path = write_config(tmp_path, VALID_CONFIG)
+        command = emit_client_config(path)["mcpServers"]["tollbooth"]["command"]
+        assert command == str(fake_bin.resolve())

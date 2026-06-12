@@ -1,5 +1,7 @@
 """Gateway configuration: load + validate tollbooth.yaml, emit client config."""
 
+import shutil
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -90,6 +92,19 @@ def load_config(path: str | Path) -> GatewayConfig:
     return config
 
 
+def _gateway_command() -> str:
+    """Absolute path to the tollbooth binary, for the emitted client config.
+
+    MCP clients spawn servers with a minimal environment — a venv-installed
+    `tollbooth` is not on their PATH, so a bare command name would not start.
+    """
+    argv0 = Path(sys.argv[0])
+    if argv0.name == "tollbooth" and argv0.exists():
+        return str(argv0.resolve())
+    found = shutil.which("tollbooth")
+    return found or "tollbooth"
+
+
 def emit_client_config(path: str | Path) -> dict:
     """Build the MCP client config block routing the client through the gateway.
 
@@ -100,7 +115,7 @@ def emit_client_config(path: str | Path) -> dict:
     return {
         "mcpServers": {
             "tollbooth": {
-                "command": "tollbooth",
+                "command": _gateway_command(),
                 "args": ["run", "-c", str(path.resolve())],
             }
         }
