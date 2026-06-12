@@ -1,11 +1,13 @@
 """tollbooth -- security gateway for AI agent tool traffic."""
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import sys
 from contextlib import ExitStack
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TextIO
 
@@ -61,6 +63,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _gateway_version() -> str:
+    try:
+        return version("tollbooth")
+    except PackageNotFoundError:  # running from a source tree without install
+        return "unknown"
+
+
+def _config_digest(config: GatewayConfig) -> str:
+    """SHA-256 over the canonical config dump: proves WHICH config was in
+    force (R9) without recording contents — env blocks carry secrets."""
+    canonical = json.dumps(config.model_dump(mode="json"), sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def build_gateway(
     config: GatewayConfig,
     audit_stream: TextIO,
@@ -95,6 +111,9 @@ async def _serve(
 ) -> None:
     gateway = build_gateway(
         config, audit_stream, audit_key=audit_key, audit_resume=audit_resume
+    )
+    gateway.pipeline.audit.session_start(
+        gateway_version=_gateway_version(), config_digest=_config_digest(config)
     )
     try:
         await gateway.start_upstreams()

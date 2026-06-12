@@ -114,6 +114,17 @@ class AuditLogger:
             self._prev = _line_digest(line, self._key)
             self._seq += 1
 
+    def session_start(self, *, gateway_version: str, config_digest: str) -> None:
+        """Open a session in the trail (R9): which gateway, under WHICH config
+        — recorded as a digest so env-block secrets never reach the log."""
+        self._emit(
+            {
+                "event": "session-start",
+                "gateway_version": gateway_version,
+                "config_digest": config_digest,
+            }
+        )
+
     def decision(
         self,
         *,

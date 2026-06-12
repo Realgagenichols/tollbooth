@@ -261,6 +261,47 @@ class TestCorrelation:
         assert len({e["session"] for e in events(stream)}) == 1
 
 
+class TestSessionStart:
+    """R9: gateway startup emits a session-start event — digest, never contents."""
+
+    def test_session_start_event_chains_and_carries_fields(self):
+        stream = io.StringIO()
+        logger = AuditLogger(stream)
+        logger.session_start(gateway_version="0.1.0", config_digest="ab" * 32)
+        emit_decisions(logger, 1)
+        start, decision = events(stream)
+        assert start["event"] == "session-start"
+        assert start["seq"] == 0
+        assert start["prev"] == GENESIS
+        assert start["gateway_version"] == "0.1.0"
+        assert start["config_digest"] == "ab" * 32
+        assert decision["seq"] == 1  # decisions chain off the start event
+
+    # R9 scenario: session start without secrets
+    def test_config_digest_not_config_contents(self, tmp_path):
+        from tollbooth.config import load_config
+        from tollbooth.main import _config_digest
+
+        config_path = tmp_path / "tollbooth.yaml"
+        config_path.write_text(
+            "servers:\n"
+            "  fs:\n"
+            "    command: /bin/echo\n"
+            "    env:\n"
+            "      API_TOKEN: sentinel-env-secret-77\n",
+            encoding="utf-8",
+        )
+        config = load_config(config_path)
+        digest = _config_digest(config)
+        assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
+        assert _config_digest(config) == digest  # deterministic
+
+        stream = io.StringIO()
+        logger = AuditLogger(stream)
+        logger.session_start(gateway_version="0.1.0", config_digest=digest)
+        assert "sentinel-env-secret-77" not in stream.getvalue()
+
+
 class TestChainResume:
     """R8: appending to an existing log seeds the chain from its last line."""
 
