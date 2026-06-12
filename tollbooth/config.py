@@ -1,6 +1,7 @@
 """Gateway configuration: load + validate tollbooth.yaml, emit client config."""
 
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -76,6 +77,33 @@ class DlpConfig(BaseModel):
         return {p: o.results for p, o in self.overrides.items() if o.results is not None}
 
 
+# `module:factory` — dotted module path, one colon, identifier factory name.
+_IMPORT_SPEC = re.compile(r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*:[A-Za-z_]\w*$")
+
+
+class PluginConfig(BaseModel):
+    """One config-declared interceptor plugin (R13).
+
+    `plugin` is an explicit `module:factory` import spec — plugins are never
+    auto-discovered (no entry points): the config file is the security
+    boundary, and installing a package must not silently insert an
+    interceptor. `settings` is passed to the factory as one dict.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    plugin: str
+    settings: dict[str, object] = {}
+
+    @model_validator(mode="after")
+    def _import_spec_shape(self) -> "PluginConfig":
+        if not _IMPORT_SPEC.match(self.plugin):
+            # The spec string is an import path from the config, not a secret
+            # — echoing it is what makes the error actionable.
+            raise ValueError(f"{self.plugin!r} is not a 'module:factory' import spec")
+        return self
+
+
 class AuditConfig(BaseModel):
     """The audit: block (S1, R10).
 
@@ -98,6 +126,7 @@ class GatewayConfig(BaseModel):
     policy: PolicyConfig = PolicyConfig()
     dlp: DlpConfig = DlpConfig()
     audit: AuditConfig = AuditConfig()
+    plugins: list[PluginConfig] = []
     # Pre-M3 alias for audit.log; normalized below, rejected if both are set.
     audit_log: str | None = None
 

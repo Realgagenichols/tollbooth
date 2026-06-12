@@ -215,3 +215,35 @@ class TestAuditConfig:
         text = VALID_CONFIG + "audit:\n  record: ful\n"
         with pytest.raises(ConfigError, match="record"):
             load_config(write_config(tmp_path, text))
+
+
+class TestPluginsConfig:
+    """R13: config-declared plugin import specs."""
+
+    PLUGINS = VALID_CONFIG + (
+        "plugins:\n"
+        "  - plugin: tests.plugin_samples:deny_tool\n"
+        "    settings:\n"
+        "      tool: deploy\n"
+    )
+
+    def test_plugins_section_parses(self, tmp_path):
+        config = load_config(write_config(tmp_path, self.PLUGINS))
+        assert [p.plugin for p in config.plugins] == ["tests.plugin_samples:deny_tool"]
+        assert config.plugins[0].settings == {"tool": "deploy"}
+
+    def test_plugins_default_empty(self, tmp_path):
+        config = load_config(write_config(tmp_path, VALID_CONFIG))
+        assert config.plugins == []
+
+    # R13 scenario: broken plugin aborts startup (spec-shape half: a plugin
+    # entry that can't be an import spec fails at config validation)
+    def test_bad_import_spec_rejected(self, tmp_path):
+        bad = self.PLUGINS.replace("tests.plugin_samples:deny_tool", "no-colon-here")
+        with pytest.raises(ConfigError, match="import spec"):
+            load_config(write_config(tmp_path, bad))
+
+    def test_unknown_plugin_keys_rejected(self, tmp_path):
+        bad = self.PLUGINS.replace("settings:", "setings:")
+        with pytest.raises(ConfigError, match="setings"):
+            load_config(write_config(tmp_path, bad))
