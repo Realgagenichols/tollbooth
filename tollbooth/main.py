@@ -6,8 +6,8 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
 from contextlib import ExitStack
+from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TextIO
