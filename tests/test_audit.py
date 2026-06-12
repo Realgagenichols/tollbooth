@@ -596,3 +596,117 @@ class TestPayloadRecording:
         [event] = [json.loads(ln) for ln in log_path.read_text().splitlines()]
         assert event["args"] == args  # exact, unnormalized round-trip
         assert verify_chain(log_path).events == 1
+
+
+class TestQueryAndReplay:
+    """R11: query filters events; replay renders a session timeline."""
+
+    @staticmethod
+    def write_mixed_log(path, record="metadata"):
+        from tollbooth.audit import AuditLogger
+
+        with open(path, "w", encoding="utf-8") as handle:
+            logger = AuditLogger(handle, record=record)
+            logger.session_start(gateway_version="0.1.0", config_digest="ab" * 32)
+            logger.decision(
+                path="request", server="fs", tool="read", decision="allow",
+                reason_id="allow-reads", call_id="c1",
+                args={"path": "/tmp/replay-arg"},
+            )
+            logger.decision(
+                path="result", server="fs", tool="read", decision="allow",
+                reason_id="redacted:aws-access-key", call_id="c1",
+                content="key [REDACTED:aws-access-key] end",
+            )
+            logger.decision(
+                path="request", server="shell", tool="exec", decision="deny",
+                reason_id="no-exec", call_id="c2",
+            )
+        return logger.session_id
+
+    def test_query_by_decision(self, tmp_path):
+        from tollbooth.audit import query_events
+
+        log = tmp_path / "audit.jsonl"
+        self.write_mixed_log(log)
+        denies = query_events(log, decision="deny")
+        assert [e["tool"] for e in denies] == ["exec"]
+
+    def test_query_by_server_and_session(self, tmp_path):
+        from tollbooth.audit import query_events
+
+        log = tmp_path / "audit.jsonl"
+        session = self.write_mixed_log(log)
+        assert len(query_events(log, server="fs")) == 2
+        assert len(query_events(log, session=session)) == 4  # incl. session-start
+        assert query_events(log, session="nope") == []
+
+    def test_query_by_time_window(self, tmp_path):
+        from datetime import datetime
+
+        from tollbooth.audit import query_events
+
+        log = tmp_path / "audit.jsonl"
+        self.write_mixed_log(log)
+        all_events = query_events(log)
+        second_ts = datetime.fromisoformat(all_events[1]["ts"])
+        assert len(query_events(log, since=second_ts)) == 3  # events 2..4
+        assert len(query_events(log, until=second_ts)) == 2  # events 1..2
+        far_future = datetime.fromisoformat("2099-01-01T00:00:00+00:00")
+        assert query_events(log, since=far_future) == []
+
+    def test_query_naive_bounds_treated_as_utc(self, tmp_path):
+        from datetime import datetime
+
+        from tollbooth.audit import query_events
+
+        log = tmp_path / "audit.jsonl"
+        self.write_mixed_log(log)
+        naive_past = datetime(2020, 1, 1)  # no tzinfo — must not TypeError
+        assert len(query_events(log, since=naive_past)) == 4
+
+    def test_query_malformed_line_fails_without_echo(self, tmp_path):
+        from tollbooth.audit import AuditError, query_events
+
+        log = tmp_path / "audit.jsonl"
+        self.write_mixed_log(log)
+        with open(log, "a", encoding="utf-8") as handle:
+            handle.write("sentinel-garbage not json\n")
+        with pytest.raises(AuditError) as excinfo:
+            query_events(log)
+        assert "line 5" in str(excinfo.value)
+        assert "sentinel-garbage" not in str(excinfo.value)
+
+    # R11 scenario: replay a full-record session
+    def test_replay_full_session_includes_payloads(self, tmp_path):
+        from tollbooth.audit import replay_session
+
+        log = tmp_path / "audit.jsonl"
+        session = self.write_mixed_log(log, record="full")
+        # NB: write_mixed_log passes payloads explicitly; full mode keeps them.
+        text = replay_session(log, session)
+        assert session in text
+        assert "fs/read" in text
+        assert "shell/exec" in text
+        assert "deny" in text
+        assert "/tmp/replay-arg" in text  # recorded args rendered
+        assert "[REDACTED:aws-access-key]" in text  # redacted content rendered
+
+    # R11 scenario: replay a metadata-only session
+    def test_replay_metadata_session_renders_without_payloads(self, tmp_path):
+        from tollbooth.audit import replay_session
+
+        log = tmp_path / "audit.jsonl"
+        session = self.write_mixed_log(log, record="metadata")
+        text = replay_session(log, session)
+        assert "fs/read" in text
+        assert "no-exec" in text
+        assert "/tmp/replay-arg" not in text  # metadata mode recorded no payloads
+
+    def test_replay_unknown_session_raises(self, tmp_path):
+        from tollbooth.audit import AuditError, replay_session
+
+        log = tmp_path / "audit.jsonl"
+        self.write_mixed_log(log)
+        with pytest.raises(AuditError, match="no events"):
+            replay_session(log, "doesnotexist")

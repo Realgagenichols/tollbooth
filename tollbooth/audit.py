@@ -125,6 +125,110 @@ def verify_chain(path: str | Path, key: bytes | None = None) -> ChainHead:
     return ChainHead(events=len(lines), seq=expected_seq - 1, digest=prev)
 
 
+def _read_events(path: str | Path) -> list[dict]:
+    """Parse a JSONL audit log. Loud on malformed lines — line number only,
+    never content (Pattern 11). Does NOT verify the chain; use verify_chain."""
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise AuditError(f"cannot read audit log {path}: {exc}") from exc
+    parsed: list[dict] = []
+    for lineno, line in enumerate(_split_lines(text), start=1):
+        try:
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise TypeError("not an object")
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise AuditError(
+                f"audit log invalid: {path} line {lineno} is not a valid audit event"
+            ) from exc
+        parsed.append(event)
+    return parsed
+
+
+def _event_ts(event: dict) -> datetime | None:
+    try:
+        return datetime.fromisoformat(event["ts"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _as_utc(bound: datetime) -> datetime:
+    # Naive bounds are operator shorthand for UTC; event ts are always aware.
+    return bound if bound.tzinfo is not None else bound.replace(tzinfo=UTC)
+
+
+def query_events(
+    path: str | Path,
+    *,
+    server: str | None = None,
+    tool: str | None = None,
+    decision: str | None = None,
+    session: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> list[dict]:
+    """Filter audit events (R11). Field filters are exact matches; events
+    lacking a filtered field (e.g. session-start has no decision) are excluded
+    by that filter. since/until are inclusive."""
+    matched = []
+    for event in _read_events(path):
+        if server is not None and event.get("server") != server:
+            continue
+        if tool is not None and event.get("tool") != tool:
+            continue
+        if decision is not None and event.get("decision") != decision:
+            continue
+        if session is not None and event.get("session") != session:
+            continue
+        if since is not None or until is not None:
+            ts = _event_ts(event)
+            if ts is None:
+                continue
+            if since is not None and ts < _as_utc(since):
+                continue
+            if until is not None and ts > _as_utc(until):
+                continue
+        matched.append(event)
+    return matched
+
+
+def _render_event(event: dict) -> list[str]:
+    ts = event.get("ts", "?")
+    kind = event.get("event", "?")
+    if kind == "session-start":
+        version = event.get("gateway_version", "?")
+        digest = str(event.get("config_digest", "?"))
+        return [f"{ts}  session started — gateway {version}, config {digest[:12]}…"]
+    target = f"{event.get('server', '?')}/{event.get('tool', '?')}"
+    reason = event.get("reason_id")
+    suffix = f" ({reason})" if reason else ""
+    call_id = event.get("call_id")
+    call = f" [call {str(call_id)[:8]}]" if call_id else ""
+    lines = [
+        f"{ts}  {event.get('path', '?'):7s} {target} → "
+        f"{event.get('decision', '?')}{suffix}{call}"
+    ]
+    if "args" in event:
+        lines.append(f"        args: {json.dumps(event['args'], ensure_ascii=False)}")
+    if "content" in event:
+        lines.append(f"        content: {event['content']}")
+    return lines
+
+
+def replay_session(path: str | Path, session_id: str) -> str:
+    """Chronological timeline of one session (R11). Renders recorded payloads
+    when present; a metadata-only session renders as a decision timeline."""
+    events = query_events(path, session=session_id)
+    if not events:
+        raise AuditError(f"no events for session {session_id!r} in {path}")
+    lines = [f"session {session_id} — {len(events)} event(s)"]
+    for event in events:
+        lines.extend(_render_event(event))
+    return "\n".join(lines)
+
+
 def audit_key_from_env() -> bytes | None:
     """Chain key from TOLLBOOTH_AUDIT_KEY (env, never a CLI flag). With a key,
     chain hashes are HMAC-SHA-256 — a rewritten file can't forge a valid chain
