@@ -1,0 +1,6 @@
+"""Placeholder test -- replace with real tests."""
+
+
+def test_placeholder():
+    """Remove this once real tests exist."""
+    assert True
