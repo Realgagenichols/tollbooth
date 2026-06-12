@@ -1,11 +1,13 @@
-"""Tests for S1: structured, redacting audit logging."""
+"""Tests for S1 (structured, redacting audit logging) and the M3 audit trail:
+R8 tamper-evident chain, R9 session/call correlation."""
 
+import hashlib
 import io
 import json
 
 import pytest
 
-from tollbooth.audit import AuditLogger
+from tollbooth.audit import GENESIS, AuditLogger
 from tollbooth.pipeline import Pipeline, PolicyInterceptor, ToolCall
 from tollbooth.policy import Decision, Matcher, Rule
 
@@ -164,3 +166,34 @@ class TestAuditEvents:
         pipeline = Pipeline()
         result = pipeline.evaluate_request(ToolCall(server="s", tool="t", args={}))
         assert result.decision is Decision.ALLOW
+
+
+def emit_decisions(logger: AuditLogger, n: int) -> None:
+    for i in range(n):
+        logger.decision(
+            path="request", server="s", tool=f"t{i}", decision="allow", reason_id=None
+        )
+
+
+class TestChain:
+    """R8 writer side: every event extends a hash chain."""
+
+    def test_seq_is_monotonic_from_zero(self):
+        stream = io.StringIO()
+        emit_decisions(AuditLogger(stream), 3)
+        assert [e["seq"] for e in events(stream)] == [0, 1, 2]
+
+    def test_first_event_links_to_genesis(self):
+        stream = io.StringIO()
+        emit_decisions(AuditLogger(stream), 1)
+        [event] = events(stream)
+        assert event["prev"] == GENESIS
+        assert event["v"] == 2
+
+    def test_each_event_carries_hash_of_previous_line(self):
+        stream = io.StringIO()
+        emit_decisions(AuditLogger(stream), 3)
+        lines = stream.getvalue().splitlines()
+        for prev_line, line in zip(lines, lines[1:], strict=False):
+            expected = hashlib.sha256(prev_line.encode("utf-8")).hexdigest()
+            assert json.loads(line)["prev"] == expected
