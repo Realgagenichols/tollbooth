@@ -185,6 +185,63 @@ class TestRunWiring:
             _open_audit_stream(config, stack)
 
 
+class TestAuditVerify:
+    """R8: `tollbooth audit verify` validates the chain from the CLI."""
+
+    @staticmethod
+    def _write_log(path, n=3, key=None):
+        from tollbooth.audit import AuditLogger
+
+        with open(path, "w", encoding="utf-8") as handle:
+            logger = AuditLogger(handle, key=key)
+            for i in range(n):
+                logger.decision(
+                    path="request",
+                    server="s",
+                    tool=f"t{i}",
+                    decision="allow",
+                    reason_id=None,
+                )
+        return path
+
+    def test_intact_log_reports_ok_with_head(self, monkeypatch, capsys, tmp_path):
+        log = self._write_log(tmp_path / "audit.jsonl")
+        monkeypatch.delenv("TOLLBOOTH_AUDIT_KEY", raising=False)
+        code = run_cli(monkeypatch, "audit", "verify", "--log", str(log))
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "OK: 3 event(s)" in out
+        assert "seq=2" in out
+        assert "mode=sha256" in out
+
+    def test_tampered_log_exits_one_without_echo(self, monkeypatch, capsys, tmp_path):
+        log = self._write_log(tmp_path / "audit.jsonl")
+        lines = log.read_text(encoding="utf-8").splitlines()
+        lines[0] = lines[0].replace('"t0"', '"sentinel-tamper"')
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        monkeypatch.delenv("TOLLBOOTH_AUDIT_KEY", raising=False)
+        code = run_cli(monkeypatch, "audit", "verify", "--log", str(log))
+        assert code == 1
+        err = capsys.readouterr().err
+        assert "line 2" in err  # break surfaces at the next link
+        assert "sentinel-tamper" not in err
+
+    def test_keyed_log_verifies_with_env_key(self, monkeypatch, capsys, tmp_path):
+        log = self._write_log(tmp_path / "audit.jsonl", key=b"k3y")
+        monkeypatch.setenv("TOLLBOOTH_AUDIT_KEY", "k3y")
+        code = run_cli(monkeypatch, "audit", "verify", "--log", str(log))
+        assert code == 0
+        assert "mode=hmac-sha256" in capsys.readouterr().out
+
+    def test_missing_log_exits_one(self, monkeypatch, capsys, tmp_path):
+        monkeypatch.delenv("TOLLBOOTH_AUDIT_KEY", raising=False)
+        code = run_cli(
+            monkeypatch, "audit", "verify", "--log", str(tmp_path / "absent.jsonl")
+        )
+        assert code == 1
+        assert "cannot read" in capsys.readouterr().err
+
+
 class TestImport:
     """S2: bootstrap tollbooth.yaml from an existing MCP client config."""
 

@@ -336,3 +336,115 @@ class TestChainResume:
             tail_state(log_path)
         assert "sentinel-payload-xyz" not in str(excinfo.value)
         assert "audit.jsonl" in str(excinfo.value)
+
+
+def write_log(path, n, key=None):
+    """A fresh chained log with n decision events; returns the lines."""
+    with open(path, "w", encoding="utf-8") as handle:
+        emit_decisions(AuditLogger(handle, key=key), n)
+    return path.read_text(encoding="utf-8").splitlines()
+
+
+class TestVerifyChain:
+    """R8: `verify_chain` detects modification, deletion, and reordering."""
+
+    # R8 scenario: intact log verifies
+    def test_intact_log_verifies_with_head(self, tmp_path):
+        from tollbooth.audit import verify_chain
+
+        log_path = tmp_path / "audit.jsonl"
+        lines = write_log(log_path, 3)
+        head = verify_chain(log_path)
+        assert head.events == 3
+        assert head.seq == 2
+        assert head.digest == hashlib.sha256(lines[-1].encode("utf-8")).hexdigest()
+
+    # R8 scenario: modified event detected (and content never echoed)
+    def test_modified_line_detected_without_echo(self, tmp_path):
+        from tollbooth.audit import AuditError, verify_chain
+
+        log_path = tmp_path / "audit.jsonl"
+        lines = write_log(log_path, 3)
+        lines[1] = lines[1].replace('"t1"', '"tampered-sentinel-tool"')
+        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with pytest.raises(AuditError) as excinfo:
+            verify_chain(log_path)
+        message = str(excinfo.value)
+        assert "line 3" in message  # break detected where prev no longer matches
+        assert "tampered-sentinel-tool" not in message
+
+    # R8 scenario: deleted event detected
+    def test_deleted_interior_line_detected(self, tmp_path):
+        from tollbooth.audit import AuditError, verify_chain
+
+        log_path = tmp_path / "audit.jsonl"
+        lines = write_log(log_path, 3)
+        del lines[1]
+        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with pytest.raises(AuditError, match="line 2"):
+            verify_chain(log_path)
+
+    def test_reordered_lines_detected(self, tmp_path):
+        from tollbooth.audit import AuditError, verify_chain
+
+        log_path = tmp_path / "audit.jsonl"
+        lines = write_log(log_path, 3)
+        lines[1], lines[2] = lines[2], lines[1]
+        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with pytest.raises(AuditError):
+            verify_chain(log_path)
+
+    # R8 scenario: chain spans restarts
+    def test_restart_appended_log_verifies(self, tmp_path):
+        from tollbooth.audit import tail_state, verify_chain
+
+        log_path = tmp_path / "audit.jsonl"
+        write_log(log_path, 2)
+        with open(log_path, "a", encoding="utf-8") as handle:
+            emit_decisions(AuditLogger(handle, resume=tail_state(log_path)), 2)
+        head = verify_chain(log_path)
+        assert head.events == 4
+        assert head.seq == 3
+
+    # R8 scenario: forged chain without the key
+    def test_unkeyed_reforge_of_keyed_log_fails_under_key(self, tmp_path):
+        from tollbooth.audit import AuditError, verify_chain
+
+        log_path = tmp_path / "audit.jsonl"
+        write_log(log_path, 3, key=b"k3y")
+        assert verify_chain(log_path, key=b"k3y").events == 3
+
+        # Attacker rewrites the file, recomputing plain SHA-256 links.
+        events_list = [json.loads(ln) for ln in log_path.read_text().splitlines()]
+        events_list[1]["tool"] = "forged"
+        forged_lines = []
+        prev = "genesis"
+        for event in events_list:
+            event["prev"] = prev
+            line = json.dumps(event, ensure_ascii=False)
+            forged_lines.append(line)
+            prev = hashlib.sha256(line.encode("utf-8")).hexdigest()
+        log_path.write_text("\n".join(forged_lines) + "\n", encoding="utf-8")
+        with pytest.raises(AuditError):
+            verify_chain(log_path, key=b"k3y")
+
+    def test_malformed_line_fails_loudly_without_echo(self, tmp_path):
+        from tollbooth.audit import AuditError, verify_chain
+
+        log_path = tmp_path / "audit.jsonl"
+        write_log(log_path, 2)
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write("garbage sentinel-not-json {{{\n")
+        with pytest.raises(AuditError) as excinfo:
+            verify_chain(log_path)
+        assert "line 3" in str(excinfo.value)
+        assert "sentinel-not-json" not in str(excinfo.value)
+
+    def test_empty_log_verifies_as_zero_events(self, tmp_path):
+        from tollbooth.audit import verify_chain
+
+        log_path = tmp_path / "audit.jsonl"
+        log_path.touch()
+        head = verify_chain(log_path)
+        assert head.events == 0
+        assert head.seq is None

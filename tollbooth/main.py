@@ -13,7 +13,13 @@ from typing import TextIO
 
 import anyio
 
-from tollbooth.audit import AuditError, AuditLogger, audit_key_from_env, tail_state
+from tollbooth.audit import (
+    AuditError,
+    AuditLogger,
+    audit_key_from_env,
+    tail_state,
+    verify_chain,
+)
 from tollbooth.config import (
     ConfigError,
     GatewayConfig,
@@ -59,6 +65,15 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument(
         "-o", "--output", default="tollbooth.yaml", help="Where to write the gateway config"
     )
+
+    audit_parser = subparsers.add_parser(
+        "audit", help="Inspect the audit log (verify the tamper-evident chain)"
+    )
+    audit_sub = audit_parser.add_subparsers(dest="audit_command", required=True)
+    verify_parser = audit_sub.add_parser(
+        "verify", help="Verify the audit chain (uses TOLLBOOTH_AUDIT_KEY if set)"
+    )
+    verify_parser.add_argument("--log", required=True, help="Path to the audit JSONL log")
 
     return parser
 
@@ -119,6 +134,12 @@ async def _serve(
         await gateway.start_upstreams()
         log.info("gateway up: %d upstream(s), %d rule(s)",
                  len(config.servers), len(config.policy.rules))
+        # Make a misconfigured deploy visible: keyed vs unkeyed chain (key
+        # itself is never logged).
+        log.info(
+            "audit chain mode: %s",
+            "keyed (hmac-sha256)" if audit_key else "unkeyed (sha256)",
+        )
         await gateway.run_stdio()
     finally:
         await gateway.aclose()
@@ -189,6 +210,30 @@ def cmd_import(client_config_path: str, output: str) -> int:
     return 0
 
 
+def cmd_audit_verify(log_path: str) -> int:
+    key = audit_key_from_env()
+    try:
+        head = verify_chain(log_path, key=key)
+    except AuditError as exc:
+        # Tampered/unreadable log is a finding (exit 1), not a usage error (2).
+        print(f"tollbooth: {exc}", file=sys.stderr)
+        return 1
+    mode = "hmac-sha256 (keyed)" if key else "sha256 (unkeyed)"
+    if head.seq is None:
+        print(f"OK: 0 events, mode={mode}")
+    else:
+        print(
+            f"OK: {head.events} event(s), head seq={head.seq} hash={head.digest}, "
+            f"mode={mode}"
+        )
+        print(
+            "record the head externally: a log truncated back to an earlier "
+            "event still verifies",
+            file=sys.stderr,
+        )
+    return 0
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -203,6 +248,8 @@ def main() -> None:
     try:
         if args.command == "import":
             code = cmd_import(args.client_config, args.output)
+        elif args.command == "audit":
+            code = cmd_audit_verify(args.log)
         else:
             commands = {"run": cmd_run, "validate": cmd_validate, "emit-config": cmd_emit_config}
             code = commands[args.command](args.config)

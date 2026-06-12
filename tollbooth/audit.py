@@ -13,6 +13,7 @@ import json
 import os
 import threading
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
@@ -46,7 +47,8 @@ def tail_state(path: str | Path) -> tuple[int, str] | None:
     last = lines[-1]
     try:
         seq = json.loads(last)["seq"]
-        if not isinstance(seq, int):
+        # bool is an int subclass — a tampered `"seq": true` must not resume.
+        if not isinstance(seq, int) or isinstance(seq, bool):
             raise KeyError("seq")
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         # Line number + path only — never the line itself (Pattern 11).
@@ -55,6 +57,61 @@ def tail_state(path: str | Path) -> tuple[int, str] | None:
             "is not a valid audit event"
         ) from exc
     return seq, last
+
+
+@dataclass(frozen=True)
+class ChainHead:
+    """Where a verified chain ends. Record (seq, digest) externally to detect
+    end-truncation — a chain cut back to any earlier event still verifies."""
+
+    events: int
+    seq: int | None  # None for an empty log
+    digest: str
+
+
+def verify_chain(path: str | Path, key: bytes | None = None) -> ChainHead:
+    """Validate the audit chain (R8): every line parses, seq is gapless, and
+    each `prev` matches the digest of the preceding line. Raises AuditError at
+    the first break — naming path/line/seq only, never event contents.
+    """
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise AuditError(f"cannot read audit log {path}: {exc}") from exc
+
+    prev = GENESIS
+    expected_seq = 0
+    lines = text.splitlines()
+    for lineno, line in enumerate(lines, start=1):
+        try:
+            event = json.loads(line)
+            seq = event["seq"]
+            claimed_prev = event["prev"]
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise AuditError(
+                f"audit chain invalid: {path} line {lineno} is not a valid audit event"
+            ) from exc
+        if not isinstance(seq, int) or isinstance(seq, bool):
+            raise AuditError(
+                f"audit chain invalid: {path} line {lineno} has an invalid sequence number"
+            )
+        if seq != expected_seq:
+            raise AuditError(
+                f"audit chain broken: {path} line {lineno} — expected seq "
+                f"{expected_seq}, found {seq} (event deleted or reordered?)"
+            )
+        if claimed_prev != prev:
+            raise AuditError(
+                f"audit chain broken: {path} line {lineno} — prev hash mismatch "
+                "(an earlier event was modified, deleted, or reordered)"
+            )
+        prev = _line_digest(line, key)
+        expected_seq = seq + 1
+
+    if not lines:
+        return ChainHead(events=0, seq=None, digest=GENESIS)
+    return ChainHead(events=len(lines), seq=expected_seq - 1, digest=prev)
 
 
 def audit_key_from_env() -> bytes | None:
