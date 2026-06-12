@@ -1,20 +1,36 @@
 """Shared fixtures for tollbooth tests."""
 
+import sys
+from pathlib import Path
+
 import pytest
+
+from tollbooth.config import UpstreamConfig
+
+ECHO_SERVER = Path(__file__).parent / "echo_server.py"
 
 
 @pytest.fixture
-def make_sample_data():
-    """Factory fixture -- customize per project.
+def anyio_backend():
+    # mcp SDK is anyio-based; run async tests on asyncio only.
+    return "asyncio"
 
-    Factory fixtures let tests construct domain objects without
-    depending on real files, APIs, or databases. Each test specifies
-    only the fields it cares about; everything else gets sensible defaults.
+
+@pytest.fixture
+def make_upstream_config():
+    """Factory for upstream launch specs without touching real MCP servers.
+
+    Defaults to the in-repo echo server subprocess; override `command`/`args`
+    to simulate broken upstreams.
     """
+
     def _factory(**kwargs):
         defaults = {
-            # Add project-specific defaults here
+            "command": sys.executable,
+            "args": [str(ECHO_SERVER)],
+            "env": {},
         }
         defaults.update(kwargs)
-        return defaults
+        return UpstreamConfig.model_validate(defaults)
+
     return _factory
