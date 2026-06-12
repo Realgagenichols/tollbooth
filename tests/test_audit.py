@@ -224,6 +224,43 @@ class TestChain:
         assert audit_key_from_env() == b"hunter2"
 
 
+class TestCorrelation:
+    """R9: session and call ids correlate events."""
+
+    # R9 scenario: request/result correlation (same call id on both paths)
+    def test_request_and_result_events_share_call_id(self):
+        from tollbooth.dlp import DlpResultInterceptor
+
+        stream = io.StringIO()
+        pipeline = Pipeline(
+            request_interceptors=[PolicyInterceptor(rules=[], default=Decision.ALLOW)],
+            result_interceptors=[DlpResultInterceptor()],
+            audit=AuditLogger(stream),
+        )
+        call = ToolCall(server="fs", tool="read", args={}, call_id="call-abc")
+        pipeline.evaluate_request(call)
+        pipeline.process_result(call, "key AKIAIOSFODNN7EXAMPLE")
+        request_event, result_event = events(stream)
+        assert request_event["path"] == "request"
+        assert result_event["path"] == "result"
+        assert request_event["call_id"] == result_event["call_id"] == "call-abc"
+
+    # R9 scenario: distinct sessions — two runs carry distinct session ids
+    def test_two_loggers_have_distinct_session_ids(self):
+        first, second = io.StringIO(), io.StringIO()
+        emit_decisions(AuditLogger(first), 1)
+        emit_decisions(AuditLogger(second), 1)
+        [a] = events(first)
+        [b] = events(second)
+        assert a["session"] and b["session"]
+        assert a["session"] != b["session"]
+
+    def test_all_events_in_one_run_share_session_id(self):
+        stream = io.StringIO()
+        emit_decisions(AuditLogger(stream), 3)
+        assert len({e["session"] for e in events(stream)}) == 1
+
+
 class TestChainResume:
     """R8: appending to an existing log seeds the chain from its last line."""
 

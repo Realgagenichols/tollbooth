@@ -229,6 +229,34 @@ async def test_concurrent_calls_no_cross_talk():
     assert results == {n: f"reply-{n}" for n in range(20)}
 
 
+# R9 scenario: concurrent calls carry distinct call ids
+async def test_concurrent_calls_get_distinct_call_ids():
+    import io
+    import json
+
+    from tollbooth.audit import AuditLogger
+
+    echo = FakeUpstream("echo", {"echo": lambda args: "ok"})
+    stream = io.StringIO()
+    pipeline = Pipeline(
+        request_interceptors=[PolicyInterceptor(rules=[], default=Decision.ALLOW)],
+        audit=AuditLogger(stream),
+    )
+    gateway = Gateway(upstreams={"echo": echo}, pipeline=pipeline)
+
+    async with create_connected_server_and_client_session(gateway.server) as client:
+        async with anyio.create_task_group() as tg:
+            for n in range(5):
+                tg.start_soon(client.call_tool, "echo_echo", {"n": n})
+
+    call_ids = [
+        json.loads(line)["call_id"] for line in stream.getvalue().splitlines()
+    ]
+    assert len(call_ids) == 5
+    assert all(call_ids)  # every event carries one
+    assert len(set(call_ids)) == 5  # all distinct
+
+
 class StructuredFake:
     """Upstream double returning structuredContent alongside empty content."""
 

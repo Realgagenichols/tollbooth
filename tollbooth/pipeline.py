@@ -17,11 +17,16 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ToolCall:
-    """One tool invocation, in upstream terms (server + original tool name)."""
+    """One tool invocation, in upstream terms (server + original tool name).
+
+    call_id correlates the request- and result-path audit events of one
+    invocation (R9); the proxy assigns it per incoming call.
+    """
 
     server: str
     tool: str
     args: dict[str, object]
+    call_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -117,6 +122,7 @@ class Pipeline:
                 tool=call.tool,
                 decision=str(decision),
                 reason_id=reason_id,
+                call_id=call.call_id or None,
             )
 
     def _on_failure(self, stage_name: str, call: ToolCall, exc: Exception) -> bool:

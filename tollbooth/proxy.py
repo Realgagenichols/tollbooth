@@ -6,6 +6,7 @@ Every call runs the request pipeline; every result runs the result pipeline.
 """
 
 import logging
+import uuid
 from contextlib import AsyncExitStack
 
 import mcp.types as types
@@ -106,7 +107,9 @@ class Gateway:
         if route is None:
             return _error_result(f"tollbooth: unknown tool {name!r}.")
         server_name, tool_name = route
-        call = ToolCall(server=server_name, tool=tool_name, args=args)
+        call = ToolCall(
+            server=server_name, tool=tool_name, args=args, call_id=uuid.uuid4().hex
+        )
 
         verdict = self.pipeline.evaluate_request(call)
         if verdict.decision is not Decision.ALLOW:

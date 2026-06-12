@@ -12,6 +12,7 @@ import hmac
 import json
 import os
 import threading
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
@@ -87,6 +88,8 @@ class AuditLogger:
         self._stream = stream
         self._lock = threading.Lock()
         self._key = key  # read once here; never logged (R8)
+        # One logger per gateway run, so this IS the session id (R9).
+        self.session_id = uuid.uuid4().hex
         if resume is None:
             self._seq = 0
             self._prev = GENESIS
@@ -102,6 +105,7 @@ class AuditLogger:
                 "ts": datetime.now(UTC).isoformat(),
                 "seq": self._seq,
                 "prev": self._prev,
+                "session": self.session_id,
                 **fields,
             }
             line = json.dumps(event, ensure_ascii=False)
@@ -118,10 +122,12 @@ class AuditLogger:
         tool: str,
         decision: str,
         reason_id: str | None,
+        call_id: str | None = None,
     ) -> None:
         self._emit(
             {
                 "event": "decision",
+                "call_id": call_id,
                 "path": path,
                 "server": server,
                 "tool": tool,
