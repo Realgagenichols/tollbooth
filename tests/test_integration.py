@@ -164,12 +164,23 @@ audit_log: {audit_path}
 
     audit_text = audit_path.read_text()
     events = [json.loads(line) for line in audit_text.splitlines()]
+    # M3 (R9): the run opens with a session-start event carrying a config
+    # digest, never config contents.
+    start, *decisions = events
+    assert start["event"] == "session-start"
+    assert len(start["config_digest"]) == 64
     # leak emits TWO redaction events: FastMCP returns the secret in both the
     # text block and structuredContent, and each surface is scanned (R7).
-    assert [e["decision"] for e in events] == ["allow", "deny", "allow", "allow", "allow", "deny"]
-    assert events[3]["reason_id"] == "redacted:aws-access-key"
-    assert events[4]["reason_id"] == "redacted:aws-access-key"
-    assert events[5]["reason_id"] == "dlp:pan"
+    assert [e["decision"] for e in decisions] == [
+        "allow", "deny", "allow", "allow", "allow", "deny",
+    ]
+    assert decisions[3]["reason_id"] == "redacted:aws-access-key"
+    assert decisions[4]["reason_id"] == "redacted:aws-access-key"
+    assert decisions[5]["reason_id"] == "dlp:pan"
+    # R9: one session, every event stamped with it; request/result of the
+    # leak call share one call id.
+    assert len({e["session"] for e in events}) == 1
+    assert decisions[2]["call_id"] == decisions[3]["call_id"]
     assert "4111111111111111" not in audit_text
     assert "AKIAIOSFODNN7EXAMPLE" not in audit_text
 
