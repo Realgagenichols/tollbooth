@@ -254,6 +254,27 @@ class TestDlpResultInterceptor:
         assert edit.reason_ids == ()
 
 
+class TestOverrideValidation:
+    # Section-2 review finding: an unrecognized action (or pattern id) must
+    # raise at construction — never silently degrade to allow (fail-closed).
+    @pytest.mark.regression
+    def test_unknown_action_raises(self):
+        from tollbooth.dlp import DlpRequestInterceptor, DlpResultInterceptor
+
+        with pytest.raises(ValueError, match="invalid result action 'blok'"):
+            DlpResultInterceptor(overrides={"ssn": "blok"})
+        # 'redact' is a valid RESULT action but not a REQUEST action.
+        with pytest.raises(ValueError, match="invalid request action 'redact'"):
+            DlpRequestInterceptor(overrides={"pan": "redact"})
+
+    @pytest.mark.regression
+    def test_unknown_pattern_id_raises(self):
+        from tollbooth.dlp import DlpRequestInterceptor
+
+        with pytest.raises(ValueError, match="unknown DLP pattern id 'pann'"):
+            DlpRequestInterceptor(overrides={"pann": "allow"})
+
+
 class TestUnicodeOffsets:
     # Cross-cutting Pattern 7: non-ASCII content before/around a secret must
     # not skew spans — redaction (R7) slices by these offsets.

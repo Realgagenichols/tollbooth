@@ -122,6 +122,26 @@ class TestAuditEvents:
         assert event["decision"] == "deny"
         assert event["reason_id"] == "interceptor-failure:boom"
 
+    # S1/R7: one combined event per transformed result, none for clean passes.
+    def test_redaction_emits_exactly_one_event(self):
+        from tollbooth.dlp import DlpResultInterceptor
+
+        stream = io.StringIO()
+        pipeline = Pipeline(
+            result_interceptors=[DlpResultInterceptor()], audit=AuditLogger(stream)
+        )
+        call = ToolCall(server="fs", tool="read_file", args={})
+
+        pipeline.process_result(call, "nothing sensitive")
+        assert events(stream) == []  # clean pass-through: no event
+
+        pipeline.process_result(call, "key AKIAIOSFODNN7EXAMPLE ssn 123-45-6789")
+        [event] = events(stream)
+        assert event["path"] == "result"
+        assert event["decision"] == "allow"
+        assert event["reason_id"] == "redacted:aws-access-key,ssn"
+        assert "AKIAIOSFODNN7EXAMPLE" not in stream.getvalue()
+
     def test_result_block_is_audited(self):
         from tollbooth.pipeline import BlockResult
 

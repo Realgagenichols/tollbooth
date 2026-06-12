@@ -172,6 +172,19 @@ REQUEST_ACTIONS = ("block", "allow")
 RESULT_ACTIONS = ("redact", "block", "allow")
 
 
+def _validate_overrides(overrides: dict[str, str], allowed: tuple[str, ...], where: str) -> None:
+    # Fail-closed invariant: an unrecognized action must raise at construction,
+    # never silently degrade to allow (dict.get(key, default) hides typos).
+    for pattern_id, action in overrides.items():
+        if pattern_id not in PATTERN_IDS:
+            raise ValueError(f"unknown DLP pattern id {pattern_id!r} in {where} overrides")
+        if action not in allowed:
+            raise ValueError(
+                f"invalid {where} action {action!r} for pattern {pattern_id!r}; "
+                f"expected one of {allowed}"
+            )
+
+
 def _iter_strings(value: object) -> Iterator[str]:
     """Yield every scannable leaf in a tool-call argument tree.
 
@@ -197,6 +210,7 @@ class DlpRequestInterceptor:
 
     def __init__(self, overrides: dict[str, str] | None = None):
         self.overrides = overrides or {}
+        _validate_overrides(self.overrides, REQUEST_ACTIONS, "request")
 
     def check_request(self, call: ToolCall) -> PolicyResult:
         found: set[str] = set()
@@ -230,6 +244,7 @@ class DlpResultInterceptor:
 
     def __init__(self, overrides: dict[str, str] | None = None):
         self.overrides = overrides or {}
+        _validate_overrides(self.overrides, RESULT_ACTIONS, "result")
 
     def _action(self, pattern_id: str) -> str:
         return self.overrides.get(pattern_id, "redact")
