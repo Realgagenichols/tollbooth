@@ -1,8 +1,19 @@
 """tollbooth -- security gateway for AI agent tool traffic."""
 
 import argparse
+import json
 import logging
 import sys
+from contextlib import ExitStack
+from typing import TextIO
+
+import anyio
+
+from tollbooth.audit import AuditLogger
+from tollbooth.config import ConfigError, GatewayConfig, emit_client_config, load_config
+from tollbooth.pipeline import Pipeline, PolicyInterceptor
+from tollbooth.proxy import Gateway
+from tollbooth.upstream import StdioUpstream, UpstreamError
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +41,61 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_gateway(config: GatewayConfig, audit_stream: TextIO) -> Gateway:
+    """Wire config into the runtime object graph (pipeline, upstreams, gateway)."""
+    pipeline = Pipeline(
+        request_interceptors=[
+            PolicyInterceptor(rules=config.policy.rules, default=config.policy.default)
+        ],
+        fail_open=(config.policy.failure_mode == "open"),
+        audit=AuditLogger(audit_stream),
+    )
+    upstreams = {name: StdioUpstream(name, spec) for name, spec in config.servers.items()}
+    return Gateway(upstreams=upstreams, pipeline=pipeline)
+
+
+async def _serve(config: GatewayConfig, audit_stream: TextIO) -> None:
+    gateway = build_gateway(config, audit_stream)
+    try:
+        await gateway.start_upstreams()
+        log.info("gateway up: %d upstream(s), %d rule(s)",
+                 len(config.servers), len(config.policy.rules))
+        await gateway.run_stdio()
+    finally:
+        await gateway.aclose()
+
+
+def cmd_run(config_path: str) -> int:
+    config = load_config(config_path)
+    with ExitStack() as stack:
+        if config.audit_log is not None:
+            audit_stream = stack.enter_context(
+                open(config.audit_log, "a", encoding="utf-8")  # noqa: SIM115
+            )
+        else:
+            audit_stream = sys.stderr
+        try:
+            anyio.run(_serve, config, audit_stream)
+        except UpstreamError as exc:
+            print(f"tollbooth: {exc}", file=sys.stderr)
+            return 1
+    return 0
+
+
+def cmd_validate(config_path: str) -> int:
+    config = load_config(config_path)
+    print(
+        f"OK: {len(config.servers)} server(s), {len(config.policy.rules)} rule(s), "
+        f"default={config.policy.default}, failure_mode={config.policy.failure_mode}"
+    )
+    return 0
+
+
+def cmd_emit_config(config_path: str) -> int:
+    print(json.dumps(emit_client_config(config_path), indent=2))
+    return 0
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -41,12 +107,13 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    if args.command == "run":
-        raise NotImplementedError("implemented in section 8")
-    if args.command == "validate":
-        raise NotImplementedError("implemented in section 8")
-    if args.command == "emit-config":
-        raise NotImplementedError("implemented in section 8")
+    commands = {"run": cmd_run, "validate": cmd_validate, "emit-config": cmd_emit_config}
+    try:
+        code = commands[args.command](args.config)
+    except ConfigError as exc:
+        print(f"tollbooth: {exc}", file=sys.stderr)
+        sys.exit(2)
+    sys.exit(code)
 
 
 if __name__ == "__main__":

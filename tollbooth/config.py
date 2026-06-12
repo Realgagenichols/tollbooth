@@ -48,6 +48,8 @@ class GatewayConfig(BaseModel):
 
     servers: dict[str, UpstreamConfig]
     policy: PolicyConfig = PolicyConfig()
+    # JSONL audit destination (S1); None = stderr alongside the log lines.
+    audit_log: str | None = None
 
 
 def load_config(path: str | Path) -> GatewayConfig:
