@@ -19,3 +19,13 @@ wheels/
 
 # Environment
 .env
+
+# AI assistant workflow (local session tooling, not project content)
+CLAUDE.md
+tasks/
+changes/
+.claude/
+
+# Local gateway runtime artifacts
+/tollbooth.yaml
+tollbooth-audit.jsonl
