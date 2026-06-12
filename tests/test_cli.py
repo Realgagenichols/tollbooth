@@ -387,3 +387,80 @@ class TestImport:
         out = tmp_path / "out.yaml"
         assert run_cli(monkeypatch, "import", str(client), "-o", str(out)) == 0
         assert set(load_config(out).servers) == {"fs"}
+
+
+class TestAuditQueryReplay:
+    """R11: query and replay from the CLI."""
+
+    @staticmethod
+    def _write_log(path, record="metadata"):
+        from tollbooth.audit import AuditLogger
+
+        with open(path, "w", encoding="utf-8") as handle:
+            logger = AuditLogger(handle, record=record)
+            logger.session_start(gateway_version="0.1.0", config_digest="ab" * 32)
+            logger.decision(
+                path="request", server="fs", tool="read", decision="allow",
+                reason_id="allow-reads", call_id="c1",
+                args={"path": "/tmp/replay-arg"},
+            )
+            logger.decision(
+                path="request", server="shell", tool="exec", decision="deny",
+                reason_id="no-exec", call_id="c2",
+            )
+        return logger.session_id
+
+    # R11 scenario: query by decision
+    def test_query_by_decision_emits_matching_jsonl(self, monkeypatch, capsys, tmp_path):
+        log = tmp_path / "audit.jsonl"
+        self._write_log(log)
+        code = run_cli(
+            monkeypatch, "audit", "query", "--log", str(log), "--decision", "deny"
+        )
+        assert code == 0
+        lines = capsys.readouterr().out.splitlines()
+        assert len(lines) == 1
+        assert json.loads(lines[0])["tool"] == "exec"
+
+    # R11 scenario: query by time window
+    def test_query_by_time_window(self, monkeypatch, capsys, tmp_path):
+        log = tmp_path / "audit.jsonl"
+        self._write_log(log)
+        all_events = [json.loads(ln) for ln in log.read_text().splitlines()]
+        since = all_events[2]["ts"]  # last event only
+        code = run_cli(
+            monkeypatch, "audit", "query", "--log", str(log), "--since", since
+        )
+        assert code == 0
+        lines = capsys.readouterr().out.splitlines()
+        assert [json.loads(ln)["tool"] for ln in lines] == ["exec"]
+
+    # R11 scenario: replay a full-record session
+    def test_replay_full_session_shows_payloads(self, monkeypatch, capsys, tmp_path):
+        log = tmp_path / "audit.jsonl"
+        session = self._write_log(log, record="full")
+        code = run_cli(monkeypatch, "audit", "replay", session, "--log", str(log))
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "fs/read" in out
+        assert "/tmp/replay-arg" in out
+
+    # R11 scenario: replay a metadata-only session
+    def test_replay_metadata_session_degrades_gracefully(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        log = tmp_path / "audit.jsonl"
+        session = self._write_log(log, record="metadata")
+        code = run_cli(monkeypatch, "audit", "replay", session, "--log", str(log))
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "shell/exec" in out
+        assert "deny" in out
+        assert "/tmp/replay-arg" not in out
+
+    def test_replay_unknown_session_exits_one(self, monkeypatch, capsys, tmp_path):
+        log = tmp_path / "audit.jsonl"
+        self._write_log(log)
+        code = run_cli(monkeypatch, "audit", "replay", "nope", "--log", str(log))
+        assert code == 1
+        assert "no events" in capsys.readouterr().err

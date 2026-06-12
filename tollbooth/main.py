@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime
 from contextlib import ExitStack
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -17,6 +18,8 @@ from tollbooth.audit import (
     AuditError,
     AuditLogger,
     audit_key_from_env,
+    query_events,
+    replay_session,
     tail_state,
     verify_chain,
 )
@@ -67,13 +70,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     audit_parser = subparsers.add_parser(
-        "audit", help="Inspect the audit log (verify the tamper-evident chain)"
+        "audit", help="Inspect the audit log: verify the chain, query, replay"
     )
     audit_sub = audit_parser.add_subparsers(dest="audit_command", required=True)
+
     verify_parser = audit_sub.add_parser(
         "verify", help="Verify the audit chain (uses TOLLBOOTH_AUDIT_KEY if set)"
     )
     verify_parser.add_argument("--log", required=True, help="Path to the audit JSONL log")
+
+    query_parser = audit_sub.add_parser(
+        "query", help="Filter audit events; matching events emitted as JSONL"
+    )
+    query_parser.add_argument("--log", required=True, help="Path to the audit JSONL log")
+    query_parser.add_argument("--server", help="Exact upstream server name")
+    query_parser.add_argument("--tool", help="Exact (un-namespaced) tool name")
+    query_parser.add_argument(
+        "--decision", choices=["allow", "deny", "require-approval"]
+    )
+    query_parser.add_argument("--session", help="Session id")
+    query_parser.add_argument(
+        "--since", type=datetime.fromisoformat, metavar="ISO8601",
+        help="Inclusive lower bound (naive = UTC)",
+    )
+    query_parser.add_argument(
+        "--until", type=datetime.fromisoformat, metavar="ISO8601",
+        help="Inclusive upper bound (naive = UTC)",
+    )
+
+    replay_parser = audit_sub.add_parser(
+        "replay", help="Render one session's chronological call/result timeline"
+    )
+    replay_parser.add_argument("session", help="Session id to replay")
+    replay_parser.add_argument("--log", required=True, help="Path to the audit JSONL log")
 
     return parser
 
@@ -239,6 +268,34 @@ def cmd_audit_verify(log_path: str) -> int:
     return 0
 
 
+def cmd_audit_query(args: argparse.Namespace) -> int:
+    try:
+        matched = query_events(
+            args.log,
+            server=args.server,
+            tool=args.tool,
+            decision=args.decision,
+            session=args.session,
+            since=args.since,
+            until=args.until,
+        )
+    except AuditError as exc:
+        print(f"tollbooth: {exc}", file=sys.stderr)
+        return 1
+    for event in matched:
+        print(json.dumps(event, ensure_ascii=False))
+    return 0
+
+
+def cmd_audit_replay(args: argparse.Namespace) -> int:
+    try:
+        print(replay_session(args.log, args.session))
+    except AuditError as exc:
+        print(f"tollbooth: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -254,7 +311,12 @@ def main() -> None:
         if args.command == "import":
             code = cmd_import(args.client_config, args.output)
         elif args.command == "audit":
-            code = cmd_audit_verify(args.log)
+            audit_commands = {
+                "verify": lambda a: cmd_audit_verify(a.log),
+                "query": cmd_audit_query,
+                "replay": cmd_audit_replay,
+            }
+            code = audit_commands[args.audit_command](args)
         else:
             commands = {"run": cmd_run, "validate": cmd_validate, "emit-config": cmd_emit_config}
             code = commands[args.command](args.config)
