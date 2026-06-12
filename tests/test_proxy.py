@@ -227,3 +227,66 @@ async def test_concurrent_calls_no_cross_talk():
                 tg.start_soon(one_call, n)
 
     assert results == {n: f"reply-{n}" for n in range(20)}
+
+
+class StructuredFake:
+    """Upstream double returning structuredContent alongside empty content."""
+
+    def __init__(self, structured):
+        self.name = "api"
+        self.structured = structured
+
+    async def start(self):
+        pass
+
+    async def list_tools(self):
+        return [
+            types.Tool(name="fetch", inputSchema={"type": "object", "additionalProperties": True})
+        ]
+
+    async def call_tool(self, tool, args):
+        return types.CallToolResult(content=[], structuredContent=self.structured, isError=False)
+
+    async def aclose(self):
+        pass
+
+
+def make_dlp_gateway(upstream):
+    from tollbooth.dlp import DlpResultInterceptor
+
+    pipeline = Pipeline(
+        request_interceptors=[PolicyInterceptor(rules=[], default=Decision.ALLOW)],
+        result_interceptors=[DlpResultInterceptor()],
+    )
+    return Gateway(upstreams={upstream.name: upstream}, pipeline=pipeline)
+
+
+class TestStructuredContent:
+    # R7: structuredContent gets its own scanning pass
+    async def test_secret_in_structured_content_redacted(self):
+        fake = StructuredFake({"note": "key AKIAIOSFODNN7EXAMPLE", "ok": True})
+        gateway = make_dlp_gateway(fake)
+        async with create_connected_server_and_client_session(gateway.server) as client:
+            result = await client.call_tool("api_fetch", {})
+        assert result.isError is False
+        assert result.structuredContent["note"] == "key [REDACTED:aws-access-key]"
+        assert result.structuredContent["ok"] is True
+
+    # R4: redaction that breaks the JSON (bare-number PAN) blocks the result
+    async def test_unredactable_structured_content_blocked(self):
+        fake = StructuredFake({"card": 4111111111111111})
+        gateway = make_dlp_gateway(fake)
+        async with create_connected_server_and_client_session(gateway.server) as client:
+            result = await client.call_tool("api_fetch", {})
+        assert result.isError is True
+        message = result.content[0].text
+        assert "withheld" in message
+        assert "4111111111111111" not in message
+
+    async def test_clean_structured_content_untouched(self):
+        fake = StructuredFake({"items": [1, 2, 3], "status": "fine"})
+        gateway = make_dlp_gateway(fake)
+        async with create_connected_server_and_client_session(gateway.server) as client:
+            result = await client.call_tool("api_fetch", {})
+        assert result.isError is False
+        assert result.structuredContent == {"items": [1, 2, 3], "status": "fine"}

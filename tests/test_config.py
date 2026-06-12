@@ -138,3 +138,46 @@ class TestEmitClientConfig:
         path = write_config(tmp_path, VALID_CONFIG)
         command = emit_client_config(path)["mcpServers"]["tollbooth"]["command"]
         assert command == str(fake_bin.resolve())
+
+
+class TestDlpConfig:
+    """R6/R7: the dlp: section — defaults, overrides, validation."""
+
+    def test_dlp_defaults_when_section_absent(self, tmp_path):
+        config = load_config(write_config(tmp_path, VALID_CONFIG))
+        assert config.dlp.enabled is True
+        assert config.dlp.overrides == {}
+        assert config.dlp.request_overrides() == {}
+        assert config.dlp.result_overrides() == {}
+
+    def test_overrides_parsed_per_direction(self, tmp_path):
+        text = VALID_CONFIG + (
+            "dlp:\n"
+            "  overrides:\n"
+            "    private-key-pem:\n"
+            "      results: block\n"
+            "    us-phone:\n"
+            "      requests: allow\n"
+            "      results: allow\n"
+        )
+        config = load_config(write_config(tmp_path, text))
+        assert config.dlp.request_overrides() == {"us-phone": "allow"}
+        assert config.dlp.result_overrides() == {
+            "private-key-pem": "block",
+            "us-phone": "allow",
+        }
+
+    def test_dlp_can_be_disabled_explicitly(self, tmp_path):
+        config = load_config(write_config(tmp_path, VALID_CONFIG + "dlp:\n  enabled: false\n"))
+        assert config.dlp.enabled is False
+
+    # R3 scenario (invalid config) applied to the dlp section
+    def test_unknown_pattern_id_rejected_at_startup(self, tmp_path):
+        text = VALID_CONFIG + "dlp:\n  overrides:\n    not-a-pattern:\n      results: block\n"
+        with pytest.raises(ConfigError, match="unknown DLP pattern id"):
+            load_config(write_config(tmp_path, text))
+
+    def test_invalid_action_rejected_at_startup(self, tmp_path):
+        text = VALID_CONFIG + "dlp:\n  overrides:\n    pan:\n      requests: redact\n"
+        with pytest.raises(ConfigError, match="pan"):
+            load_config(write_config(tmp_path, text))

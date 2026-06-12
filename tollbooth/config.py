@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
+from tollbooth.dlp import PATTERN_IDS
 from tollbooth.policy import Decision, Rule
 
 
@@ -45,11 +46,41 @@ class PolicyConfig(BaseModel):
     rules: list[Rule] = []
 
 
+class DlpOverride(BaseModel):
+    """Per-pattern action overrides; unset directions keep the defaults (R7)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    requests: Literal["block", "allow"] | None = None
+    results: Literal["redact", "block", "allow"] | None = None
+
+
+class DlpConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    overrides: dict[str, DlpOverride] = {}
+
+    @model_validator(mode="after")
+    def _known_pattern_ids(self) -> "DlpConfig":
+        unknown = sorted(set(self.overrides) - PATTERN_IDS)
+        if unknown:
+            raise ValueError(f"unknown DLP pattern id(s): {', '.join(unknown)}")
+        return self
+
+    def request_overrides(self) -> dict[str, str]:
+        return {p: o.requests for p, o in self.overrides.items() if o.requests is not None}
+
+    def result_overrides(self) -> dict[str, str]:
+        return {p: o.results for p, o in self.overrides.items() if o.results is not None}
+
+
 class GatewayConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     servers: dict[str, UpstreamConfig]
     policy: PolicyConfig = PolicyConfig()
+    dlp: DlpConfig = DlpConfig()
     # JSONL audit destination (S1); None = stderr alongside the log lines.
     audit_log: str | None = None
 

@@ -11,6 +11,7 @@ import anyio
 
 from tollbooth.audit import AuditLogger
 from tollbooth.config import ConfigError, GatewayConfig, emit_client_config, load_config
+from tollbooth.dlp import DlpRequestInterceptor, DlpResultInterceptor
 from tollbooth.pipeline import Pipeline, PolicyInterceptor
 from tollbooth.proxy import Gateway
 from tollbooth.upstream import StdioUpstream, UpstreamError
@@ -43,10 +44,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def build_gateway(config: GatewayConfig, audit_stream: TextIO) -> Gateway:
     """Wire config into the runtime object graph (pipeline, upstreams, gateway)."""
+    request_interceptors: list = [
+        PolicyInterceptor(rules=config.policy.rules, default=config.policy.default)
+    ]
+    result_interceptors: list = []
+    if config.dlp.enabled:
+        # Policy first (cheap, names rules), then DLP scans what policy allowed.
+        request_interceptors.append(DlpRequestInterceptor(config.dlp.request_overrides()))
+        result_interceptors.append(DlpResultInterceptor(config.dlp.result_overrides()))
     pipeline = Pipeline(
-        request_interceptors=[
-            PolicyInterceptor(rules=config.policy.rules, default=config.policy.default)
-        ],
+        request_interceptors=request_interceptors,
+        result_interceptors=result_interceptors,
         fail_open=(config.policy.failure_mode == "open"),
         audit=AuditLogger(audit_stream),
     )
@@ -90,9 +98,13 @@ def cmd_run(config_path: str) -> int:
 
 def cmd_validate(config_path: str) -> int:
     config = load_config(config_path)
+    dlp_state = (
+        f"on ({len(config.dlp.overrides)} override(s))" if config.dlp.enabled else "off"
+    )
     print(
         f"OK: {len(config.servers)} server(s), {len(config.policy.rules)} rule(s), "
-        f"default={config.policy.default}, failure_mode={config.policy.failure_mode}"
+        f"default={config.policy.default}, failure_mode={config.policy.failure_mode}, "
+        f"dlp={dlp_state}"
     )
     return 0
 

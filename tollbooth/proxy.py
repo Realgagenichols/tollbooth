@@ -5,6 +5,7 @@ never by string-splitting, since server names may contain underscores (R1).
 Every call runs the request pipeline; every result runs the result pipeline.
 """
 
+import json
 import logging
 from contextlib import AsyncExitStack
 
@@ -121,8 +122,8 @@ class Gateway:
     def _process_result(
         self, call: ToolCall, result: types.CallToolResult
     ) -> types.CallToolResult:
-        # Text blocks run the result pipeline (M2 DLP redacts here).
-        # M2 note: structuredContent needs its own scanning pass.
+        # Text blocks and structuredContent both run the result pipeline
+        # (DLP redacts here, R7); any non-allow verdict withholds the result.
         processed: list[types.ContentBlock] = []
         for block in result.content:
             if isinstance(block, types.TextContent):
@@ -132,7 +133,28 @@ class Gateway:
                 processed.append(block.model_copy(update={"text": verdict.content}))
             else:
                 processed.append(block)
-        return result.model_copy(update={"content": processed})
+        structured = result.structuredContent
+        if structured is not None:
+            serialized = json.dumps(structured, ensure_ascii=False)
+            verdict = self.pipeline.process_result(call, serialized)
+            if verdict.decision is not Decision.ALLOW or verdict.content is None:
+                return _error_result(verdict.message)
+            if verdict.content != serialized:
+                try:
+                    structured = json.loads(verdict.content)
+                except json.JSONDecodeError:
+                    # Redaction broke the JSON (e.g. a bare-number PAN became a
+                    # marker). A result that can't be redacted is blocked (R4).
+                    log.error(
+                        "structuredContent of %s/%s not valid JSON after redaction",
+                        call.server,
+                        call.tool,
+                    )
+                    return _error_result(
+                        f"tollbooth: result of {call.server}/{call.tool} withheld — "
+                        "sensitive data in structured content could not be redacted."
+                    )
+        return result.model_copy(update={"content": processed, "structuredContent": structured})
 
     # -- MCP server ----------------------------------------------------------
 

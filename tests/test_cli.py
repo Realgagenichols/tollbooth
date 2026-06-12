@@ -100,10 +100,42 @@ class TestRunWiring:
         gateway = build_gateway(config, audit_stream=io.StringIO())
         assert set(gateway.upstreams) == {"fs"}
         assert gateway.pipeline.fail_open is True
-        [policy] = gateway.pipeline.request_interceptors
+        # DLP is on by default: policy first, then the request scanner (R7).
+        policy, dlp_request = gateway.pipeline.request_interceptors
         assert policy.default is Decision.DENY
         assert [r.name for r in policy.rules] == ["allow-reads"]
+        assert dlp_request.name == "dlp-request"
+        [dlp_result] = gateway.pipeline.result_interceptors
+        assert dlp_result.name == "dlp-result"
         assert gateway.pipeline.audit is not None
+
+    def test_build_gateway_without_dlp_when_disabled(self, tmp_path):
+        import io
+
+        from tollbooth.config import load_config
+        from tollbooth.main import build_gateway
+
+        config_path = tmp_path / "tollbooth.yaml"
+        config_path.write_text(GOOD_CONFIG + "dlp:\n  enabled: false\n", encoding="utf-8")
+        gateway = build_gateway(load_config(config_path), audit_stream=io.StringIO())
+        [policy] = gateway.pipeline.request_interceptors
+        assert policy.name == "policy"
+        assert gateway.pipeline.result_interceptors == []
+
+    def test_build_gateway_passes_dlp_overrides(self, tmp_path):
+        import io
+
+        from tollbooth.config import load_config
+        from tollbooth.main import build_gateway
+
+        config_path = tmp_path / "tollbooth.yaml"
+        config_path.write_text(
+            GOOD_CONFIG + "dlp:\n  overrides:\n    private-key-pem:\n      results: block\n",
+            encoding="utf-8",
+        )
+        gateway = build_gateway(load_config(config_path), audit_stream=io.StringIO())
+        [dlp_result] = gateway.pipeline.result_interceptors
+        assert dlp_result.overrides == {"private-key-pem": "block"}
 
     def test_audit_log_config_field_accepted(self, tmp_path):
         from tollbooth.config import load_config
