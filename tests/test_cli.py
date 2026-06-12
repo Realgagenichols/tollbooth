@@ -183,3 +183,92 @@ class TestRunWiring:
         )
         with ExitStack() as stack, pytest.raises(ConfigError, match="audit log"):
             _open_audit_stream(config, stack)
+
+
+class TestImport:
+    """S2: bootstrap tollbooth.yaml from an existing MCP client config."""
+
+    CLIENT_CONFIG = {
+        "mcpServers": {
+            "fs": {"command": "fs-server", "args": ["--root", "/tmp"]},
+            "github": {"command": "gh-server", "env": {"GITHUB_TOKEN": "tok_import_test"}},
+        }
+    }
+
+    def write_client_config(self, tmp_path, data=None):
+        path = tmp_path / "claude_desktop_config.json"
+        path.write_text(json.dumps(data or self.CLIENT_CONFIG), encoding="utf-8")
+        return path
+
+    # S2 scenario: import from mcp.json — both servers become upstreams,
+    # permissive starter ruleset, and the file round-trips through validate
+    def test_import_two_servers_round_trips(self, monkeypatch, capsys, tmp_path):
+        from tollbooth.config import load_config
+        from tollbooth.policy import Decision
+
+        client = self.write_client_config(tmp_path)
+        out = tmp_path / "tollbooth.yaml"
+        code = run_cli(monkeypatch, "import", str(client), "-o", str(out))
+        assert code == 0
+        assert "2 upstream server(s)" in capsys.readouterr().out
+
+        config = load_config(out)  # round-trip: generated file validates
+        assert set(config.servers) == {"fs", "github"}
+        assert config.servers["fs"].args == ["--root", "/tmp"]
+        assert config.servers["github"].env == {"GITHUB_TOKEN": "tok_import_test"}
+        assert config.policy.default is Decision.ALLOW
+        assert config.policy.rules == []
+        assert config.dlp.enabled is True
+
+    def test_import_vscode_servers_key(self, monkeypatch, tmp_path):
+        from tollbooth.config import load_config
+
+        client = self.write_client_config(
+            tmp_path, {"servers": {"fs": {"command": "fs-server"}}}
+        )
+        out = tmp_path / "out.yaml"
+        assert run_cli(monkeypatch, "import", str(client), "-o", str(out)) == 0
+        assert set(load_config(out).servers) == {"fs"}
+
+    def test_non_stdio_entries_skipped_with_notice(self, monkeypatch, capsys, tmp_path):
+        client = self.write_client_config(
+            tmp_path,
+            {
+                "mcpServers": {
+                    "fs": {"command": "fs-server"},
+                    "remote": {"url": "https://example.com/mcp"},
+                }
+            },
+        )
+        out = tmp_path / "out.yaml"
+        assert run_cli(monkeypatch, "import", str(client), "-o", str(out)) == 0
+        captured = capsys.readouterr()
+        assert "1 upstream server(s)" in captured.out
+        assert "skipped 'remote'" in captured.err
+
+    # S2/R3: malformed input — clear error, no raw exception interpolation
+    def test_malformed_json_clear_error(self, monkeypatch, capsys, tmp_path):
+        path = tmp_path / "broken.json"
+        path.write_text('{"mcpServers": {token_here', encoding="utf-8")
+        out = tmp_path / "out.yaml"
+        code = run_cli(monkeypatch, "import", str(path), "-o", str(out))
+        assert code == 2
+        err = capsys.readouterr().err
+        assert "malformed JSON" in err
+        assert "token_here" not in err  # coordinates only, never source content
+        assert not out.exists()
+
+    def test_empty_or_missing_servers_rejected(self, monkeypatch, capsys, tmp_path):
+        client = self.write_client_config(tmp_path, {"mcpServers": {}})
+        code = run_cli(monkeypatch, "import", str(client), "-o", str(tmp_path / "o.yaml"))
+        assert code == 2
+        assert "no MCP servers" in capsys.readouterr().err
+
+    def test_refuses_to_overwrite_existing_output(self, monkeypatch, capsys, tmp_path):
+        client = self.write_client_config(tmp_path)
+        out = tmp_path / "tollbooth.yaml"
+        out.write_text("# precious existing config\n", encoding="utf-8")
+        code = run_cli(monkeypatch, "import", str(client), "-o", str(out))
+        assert code == 2
+        assert "refusing to overwrite" in capsys.readouterr().err
+        assert out.read_text() == "# precious existing config\n"

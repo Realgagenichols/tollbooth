@@ -10,7 +10,14 @@ from typing import TextIO
 import anyio
 
 from tollbooth.audit import AuditLogger
-from tollbooth.config import ConfigError, GatewayConfig, emit_client_config, load_config
+from tollbooth.config import (
+    ConfigError,
+    GatewayConfig,
+    emit_client_config,
+    import_client_config,
+    load_config,
+    render_starter_yaml,
+)
 from tollbooth.dlp import DlpRequestInterceptor, DlpResultInterceptor
 from tollbooth.pipeline import Pipeline, PolicyInterceptor
 from tollbooth.proxy import Gateway
@@ -38,6 +45,16 @@ def build_parser() -> argparse.ArgumentParser:
         "emit-config", help="Emit the MCP client config pointing at the gateway"
     )
     emit_parser.add_argument("-c", "--config", required=True, help="Path to tollbooth.yaml")
+
+    import_parser = subparsers.add_parser(
+        "import", help="Bootstrap tollbooth.yaml from an existing MCP client config"
+    )
+    import_parser.add_argument(
+        "client_config", help="Path to mcp.json / claude_desktop_config.json"
+    )
+    import_parser.add_argument(
+        "-o", "--output", default="tollbooth.yaml", help="Where to write the gateway config"
+    )
 
     return parser
 
@@ -114,6 +131,21 @@ def cmd_emit_config(config_path: str) -> int:
     return 0
 
 
+def cmd_import(client_config_path: str, output: str) -> int:
+    from pathlib import Path
+
+    out_path = Path(output)
+    if out_path.exists():
+        # Never clobber an existing gateway config — it IS the security boundary.
+        raise ConfigError(f"refusing to overwrite existing {out_path}; move it first")
+    config, skipped = import_client_config(client_config_path)
+    out_path.write_text(render_starter_yaml(config), encoding="utf-8")
+    print(f"wrote {out_path}: {len(config.servers)} upstream server(s), dlp=on")
+    for name in skipped:
+        print(f"skipped {name!r}: no command (non-stdio servers land in N1)", file=sys.stderr)
+    return 0
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -125,9 +157,12 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    commands = {"run": cmd_run, "validate": cmd_validate, "emit-config": cmd_emit_config}
     try:
-        code = commands[args.command](args.config)
+        if args.command == "import":
+            code = cmd_import(args.client_config, args.output)
+        else:
+            commands = {"run": cmd_run, "validate": cmd_validate, "emit-config": cmd_emit_config}
+            code = commands[args.command](args.config)
     except ConfigError as exc:
         print(f"tollbooth: {exc}", file=sys.stderr)
         sys.exit(2)
