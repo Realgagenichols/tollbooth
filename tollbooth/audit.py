@@ -174,13 +174,15 @@ class AuditLogger:
 
     def _emit(self, fields: dict) -> None:
         with self._lock:
+            # Chain/identity keys are spread LAST so no caller-supplied field
+            # can ever shadow them (matters once M4 plugins emit events).
             event = {
+                **fields,
                 "v": SCHEMA_VERSION,
                 "ts": datetime.now(UTC).isoformat(),
                 "seq": self._seq,
                 "prev": self._prev,
                 "session": self.session_id,
-                **fields,
             }
             # default=str: a payload value that isn't JSON-native must not
             # crash the trail (full mode records arbitrary tool args).
