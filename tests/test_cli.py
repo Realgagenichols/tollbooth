@@ -50,16 +50,16 @@ class TestValidate:
         out = capsys.readouterr().out
         assert "OK" in out
 
-    # R3 scenario: invalid config — clear error, nonzero exit
-    def test_bad_config_exits_nonzero_with_clear_error(self, monkeypatch, capsys, bad_config):
+    # R3 scenario: invalid config — clear error, exit 2 (config-error contract)
+    def test_bad_config_exits_two_with_clear_error(self, monkeypatch, capsys, bad_config):
         code = run_cli(monkeypatch, "validate", "-c", str(bad_config))
-        assert code != 0
+        assert code == 2
         err = capsys.readouterr().err
         assert "YAML" in err
 
-    def test_missing_file_exits_nonzero(self, monkeypatch, capsys, tmp_path):
+    def test_missing_file_exits_two(self, monkeypatch, capsys, tmp_path):
         code = run_cli(monkeypatch, "validate", "-c", str(tmp_path / "nope.yaml"))
-        assert code != 0
+        assert code == 2
 
 
 class TestEmitConfig:
@@ -77,7 +77,7 @@ class TestEmitConfig:
 
     def test_invalid_config_not_emitted(self, monkeypatch, capsys, bad_config):
         code = run_cli(monkeypatch, "emit-config", "-c", str(bad_config))
-        assert code != 0
+        assert code == 2
         assert capsys.readouterr().out == ""  # nothing emitted on error
 
 
@@ -113,3 +113,33 @@ class TestRunWiring:
         )
         config = load_config(config_path)
         assert config.audit_log == str(tmp_path / "audit.jsonl")
+
+    def test_audit_stream_opens_file_append(self, tmp_path):
+        from contextlib import ExitStack
+
+        from tollbooth.config import GatewayConfig
+        from tollbooth.main import _open_audit_stream
+
+        path = tmp_path / "audit.jsonl"
+        config = GatewayConfig.model_validate(
+            {"servers": {"fs": {"command": "x"}}, "audit_log": str(path)}
+        )
+        with ExitStack() as stack:
+            stream = _open_audit_stream(config, stack)
+            assert stream.mode == "a"
+        assert stream.closed  # ExitStack owns the handle
+
+    def test_unwritable_audit_log_is_config_error(self, tmp_path):
+        from contextlib import ExitStack
+
+        from tollbooth.config import ConfigError, GatewayConfig
+        from tollbooth.main import _open_audit_stream
+
+        config = GatewayConfig.model_validate(
+            {
+                "servers": {"fs": {"command": "x"}},
+                "audit_log": str(tmp_path / "no-such-dir" / "audit.jsonl"),
+            }
+        )
+        with ExitStack() as stack, pytest.raises(ConfigError, match="audit log"):
+            _open_audit_stream(config, stack)

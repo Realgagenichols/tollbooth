@@ -164,6 +164,52 @@ async def test_namespaced_name_collision_is_clear_error():
             await client.list_tools()
 
 
+@pytest.mark.regression
+async def test_dead_upstream_does_not_poison_discovery():
+    """One upstream failing list_tools must not break the others' catalogs."""
+
+    class DeadCatalog(FakeUpstream):
+        async def list_tools(self):
+            raise UpstreamError("upstream 'fs' list_tools failed (ClosedResourceError)")
+
+    fs = DeadCatalog("fs", {})
+    github = github_upstream()
+    gateway = make_gateway([fs, github])
+    async with create_connected_server_and_client_session(gateway.server) as client:
+        listed = await client.list_tools()
+        alive = await client.call_tool("github_create_issue", {"title": "t"})
+    assert {t.name for t in listed.tools} == {"github_create_issue"}
+    assert alive.isError is False
+
+
+async def test_start_upstreams_rollback_on_partial_failure():
+    """If the 2nd upstream fails to start, the 1st is closed, the 3rd never starts."""
+
+    class TrackedUpstream(FakeUpstream):
+        def __init__(self, name, fail=False):
+            super().__init__(name, {})
+            self.fail = fail
+            self.started = False
+            self.closed = False
+
+        async def start(self):
+            if self.fail:
+                raise UpstreamError(f"upstream {self.name!r} failed to start")
+            self.started = True
+
+        async def aclose(self):
+            self.closed = True
+
+    first = TrackedUpstream("a")
+    second = TrackedUpstream("b", fail=True)
+    third = TrackedUpstream("c")
+    gateway = make_gateway([first, second, third])
+    with pytest.raises(UpstreamError, match="'b'"):
+        await gateway.start_upstreams()
+    assert first.started and first.closed  # rolled back
+    assert third.started is False  # never reached
+
+
 # Pattern 8: concurrent calls through one gateway map to the right responses
 async def test_concurrent_calls_no_cross_talk():
     echo = FakeUpstream("echo", {"echo": lambda args: f"reply-{args['n']}"})

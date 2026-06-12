@@ -95,15 +95,29 @@ class StdioUpstream:
         session = self._require_session()
         tools: list[types.Tool] = []
         cursor: str | None = None
-        while True:
-            result = await session.list_tools(cursor=cursor)
-            tools.extend(result.tools)
-            cursor = result.nextCursor
-            if cursor is None:
-                return tools
+        try:
+            while True:
+                result = await session.list_tools(cursor=cursor)
+                tools.extend(result.tools)
+                cursor = result.nextCursor
+                if cursor is None:
+                    return tools
+        except Exception as exc:
+            raise self._transport_error("list_tools", exc) from exc
 
     async def call_tool(self, tool: str, args: dict[str, object]) -> types.CallToolResult:
-        return await self._require_session().call_tool(tool, args)
+        session = self._require_session()
+        try:
+            return await session.call_tool(tool, args)
+        except Exception as exc:
+            raise self._transport_error("call_tool", exc) from exc
+
+    def _transport_error(self, op: str, exc: Exception) -> UpstreamError:
+        # Raw transport exceptions must never reach the client (str(exc) is
+        # forwarded by the SDK's catch-all): wrap with TYPE only.
+        return UpstreamError(
+            f"upstream {self.name!r} {op} failed ({type(exc).__name__})"
+        )
 
     async def aclose(self) -> None:
         self._session = None

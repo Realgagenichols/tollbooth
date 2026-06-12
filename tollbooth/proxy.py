@@ -47,7 +47,9 @@ class Gateway:
             for upstream in self.upstreams.values():
                 await upstream.start()
                 stack.push_async_callback(upstream.aclose)
-            # All started — keep them running past this block.
+            # All started — detach the callbacks so the upstreams stay running.
+            # The detached stack is intentionally discarded: shutdown is owned
+            # by Gateway.aclose() (StdioUpstream.aclose is idempotent).
             stack.pop_all()
 
     async def aclose(self) -> None:
@@ -57,11 +59,24 @@ class Gateway:
     # -- tool aggregation ---------------------------------------------------
 
     async def _refresh_tools(self) -> list[types.Tool]:
-        """Aggregate upstream catalogs, namespace them, rebuild the route table."""
+        """Aggregate upstream catalogs, namespace them, rebuild the route table.
+
+        A dead upstream must not poison discovery for healthy ones: its catalog
+        is skipped (loudly), and its previously-known routes drop out so calls
+        to it get a clear unknown-tool/dead-upstream error instead of a hang.
+        """
         tools: list[types.Tool] = []
         routes: dict[str, tuple[str, str]] = {}
         for server_name, upstream in self.upstreams.items():
-            for tool in await upstream.list_tools():
+            try:
+                upstream_tools = await upstream.list_tools()
+            except Exception as exc:
+                # Exception TYPE only (input-echo lesson).
+                log.error(
+                    "skipping catalog of upstream %r: %s", server_name, type(exc).__name__
+                )
+                continue
+            for tool in upstream_tools:
                 namespaced = f"{server_name}_{tool.name}"
                 if namespaced in routes:
                     other = routes[namespaced]

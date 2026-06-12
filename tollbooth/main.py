@@ -65,15 +65,21 @@ async def _serve(config: GatewayConfig, audit_stream: TextIO) -> None:
         await gateway.aclose()
 
 
+def _open_audit_stream(config: GatewayConfig, stack: ExitStack) -> TextIO:
+    """Audit destination: append-mode JSONL file, or stderr when unset."""
+    if config.audit_log is None:
+        return sys.stderr
+    try:
+        return stack.enter_context(open(config.audit_log, "a", encoding="utf-8"))  # noqa: SIM115
+    except OSError as exc:
+        # Path-only message; OSError on open never echoes file contents.
+        raise ConfigError(f"cannot open audit log {config.audit_log}: {exc}") from exc
+
+
 def cmd_run(config_path: str) -> int:
     config = load_config(config_path)
     with ExitStack() as stack:
-        if config.audit_log is not None:
-            audit_stream = stack.enter_context(
-                open(config.audit_log, "a", encoding="utf-8")  # noqa: SIM115
-            )
-        else:
-            audit_stream = sys.stderr
+        audit_stream = _open_audit_stream(config, stack)
         try:
             anyio.run(_serve, config, audit_stream)
         except UpstreamError as exc:
