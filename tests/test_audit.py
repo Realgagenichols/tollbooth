@@ -197,3 +197,28 @@ class TestChain:
         for prev_line, line in zip(lines, lines[1:], strict=False):
             expected = hashlib.sha256(prev_line.encode("utf-8")).hexdigest()
             assert json.loads(line)["prev"] == expected
+
+    # R8: TOLLBOOTH_AUDIT_KEY upgrades the chain to HMAC-SHA-256.
+    def test_keyed_chain_uses_hmac_not_plain_hash(self):
+        import hmac as hmac_mod
+
+        stream = io.StringIO()
+        emit_decisions(AuditLogger(stream, key=b"k3y"), 2)
+        first, second = stream.getvalue().splitlines()
+        keyed = hmac_mod.new(b"k3y", first.encode("utf-8"), hashlib.sha256).hexdigest()
+        plain = hashlib.sha256(first.encode("utf-8")).hexdigest()
+        assert json.loads(second)["prev"] == keyed
+        assert json.loads(second)["prev"] != plain
+
+    def test_key_value_never_appears_in_log(self):
+        stream = io.StringIO()
+        emit_decisions(AuditLogger(stream, key=b"sentinel-audit-key"), 2)
+        assert "sentinel-audit-key" not in stream.getvalue()
+
+    def test_audit_key_from_env(self, monkeypatch):
+        from tollbooth.audit import audit_key_from_env
+
+        monkeypatch.delenv("TOLLBOOTH_AUDIT_KEY", raising=False)
+        assert audit_key_from_env() is None
+        monkeypatch.setenv("TOLLBOOTH_AUDIT_KEY", "hunter2")
+        assert audit_key_from_env() == b"hunter2"

@@ -10,6 +10,7 @@ reordering break the chain.
 import hashlib
 import hmac
 import json
+import os
 import threading
 from datetime import UTC, datetime
 from typing import TextIO
@@ -19,6 +20,14 @@ SCHEMA_VERSION = 2
 # event still verifies — end-truncation is detected by comparing the chain
 # head reported by `verify` against an externally recorded head.
 GENESIS = "genesis"
+
+
+def audit_key_from_env() -> bytes | None:
+    """Chain key from TOLLBOOTH_AUDIT_KEY (env, never a CLI flag). With a key,
+    chain hashes are HMAC-SHA-256 — a rewritten file can't forge a valid chain
+    without it. The key itself is never logged or echoed."""
+    raw = os.environ.get("TOLLBOOTH_AUDIT_KEY")
+    return raw.encode("utf-8") if raw else None
 
 
 def _line_digest(line: str, key: bytes | None) -> str:
@@ -34,10 +43,10 @@ class AuditLogger:
     chain (R8). seq/prev state is guarded by the same lock that serializes
     writes — concurrent tool calls share one stream (Pattern 8)."""
 
-    def __init__(self, stream: TextIO):
+    def __init__(self, stream: TextIO, *, key: bytes | None = None):
         self._stream = stream
         self._lock = threading.Lock()
-        self._key: bytes | None = None
+        self._key = key  # read once here; never logged (R8)
         self._seq = 0
         self._prev = GENESIS
 
