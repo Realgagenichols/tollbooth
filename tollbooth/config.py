@@ -57,7 +57,13 @@ def load_config(path: str | Path) -> GatewayConfig:
     try:
         config = GatewayConfig.model_validate(raw)
     except ValidationError as exc:
-        raise ConfigError(f"invalid config {path}: {exc}") from exc
+        # Never interpolate the raw ValidationError: its default rendering
+        # includes input_value, which would echo secrets from env blocks.
+        details = "; ".join(
+            f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+            for err in exc.errors(include_input=False, include_url=False)
+        )
+        raise ConfigError(f"invalid config {path}: {details}") from exc
 
     for rule in config.policy.rules:
         if rule.server != "*" and rule.server not in config.servers:

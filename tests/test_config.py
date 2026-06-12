@@ -92,6 +92,22 @@ class TestLoadConfig:
         with pytest.raises(ConfigError):
             load_config(write_config(tmp_path, bad))
 
+    @pytest.mark.regression
+    def test_validation_error_never_echoes_secret_values(self, tmp_path):
+        """A typo'd key next to a secret must not leak the secret into the error."""
+        bad = """
+servers:
+  gh:
+    command: gh-server
+    envv:
+      GITHUB_TOKEN: ghp_supersecret123
+"""
+        with pytest.raises(ConfigError) as excinfo:
+            load_config(write_config(tmp_path, bad))
+        message = str(excinfo.value)
+        assert "ghp_supersecret123" not in message
+        assert "servers.gh.envv" in message  # location stays actionable
+
 
 class TestEmitClientConfig:
     # R3 scenario: emit client config
