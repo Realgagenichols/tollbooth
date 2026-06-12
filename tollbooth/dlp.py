@@ -194,7 +194,11 @@ def _iter_strings(value: object) -> Iterator[str]:
     if isinstance(value, str):
         yield value
     elif isinstance(value, dict):
-        for v in value.values():
+        for k, v in value.items():
+            # Keys are scannable too: results keyed by account number or
+            # token are plausible shapes (section-3 review W2).
+            if isinstance(k, str):
+                yield k
             yield from _iter_strings(v)
     elif isinstance(value, list | tuple):
         for v in value:

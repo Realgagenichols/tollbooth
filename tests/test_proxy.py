@@ -305,6 +305,19 @@ class TestStructuredContent:
         assert result.structuredContent["note"] == "card [REDACTED:pan] ok"
         assert result.structuredContent["nested"][0]["deep"] == "card [REDACTED:pan] ok"
 
+    # Section-3 review W2: dict KEYS are scannable surface too. A key that
+    # needs redaction withholds the result (renaming would mutate API shape).
+    @pytest.mark.regression
+    async def test_secret_as_dict_key_withholds_result(self):
+        fake = StructuredFake({"AKIAIOSFODNN7EXAMPLE": "balance"})
+        gateway = make_dlp_gateway(fake)
+        async with create_connected_server_and_client_session(gateway.server) as client:
+            result = await client.call_tool("api_fetch", {})
+        assert result.isError is True
+        message = result.content[0].text
+        assert "withheld" in message
+        assert "AKIAIOSFODNN7EXAMPLE" not in message
+
     # Section-3 review W1: in-leaf redaction can't break JSON structure, so a
     # connection string is redacted (usable result), not false-blocked.
     @pytest.mark.regression

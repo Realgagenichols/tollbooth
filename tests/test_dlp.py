@@ -199,6 +199,13 @@ class TestDlpRequestInterceptor:
         result = self.check({"card_number": int(VISA)})
         assert result.decision is Decision.DENY
 
+    @pytest.mark.regression
+    def test_dict_key_is_scanned(self):
+        # Section-3 review W2: secrets can arrive as mapping keys.
+        result = self.check({"accounts": {AWS_KEY: "active"}})
+        assert result.decision is Decision.DENY
+        assert "aws-access-key" in result.message
+
     def test_clean_args_allowed(self):
         result = self.check({"path": "/tmp/notes.txt", "limit": 10})
         assert result.decision is Decision.ALLOW

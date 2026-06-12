@@ -184,7 +184,26 @@ class Gateway:
                 )
             return value
         if isinstance(value, dict):
-            return {k: self._scan_structured(call, v) for k, v in value.items()}
+            scanned: dict = {}
+            for key, item in value.items():
+                if isinstance(key, str):
+                    verdict = self.pipeline.process_result(call, key)
+                    if verdict.decision is not Decision.ALLOW or verdict.content is None:
+                        raise _ResultWithheld(verdict.message)
+                    if verdict.content != key:
+                        # Renaming keys would mutate the API shape — a key that
+                        # needs redaction withholds the result instead (R4).
+                        log.error(
+                            "dict key in structuredContent of %s/%s needs redaction",
+                            call.server,
+                            call.tool,
+                        )
+                        raise _ResultWithheld(
+                            f"tollbooth: result of {call.server}/{call.tool} withheld — "
+                            "sensitive data in structured content could not be redacted."
+                        )
+                scanned[key] = self._scan_structured(call, item)
+            return scanned
         if isinstance(value, list):
             return [self._scan_structured(call, v) for v in value]
         return value
