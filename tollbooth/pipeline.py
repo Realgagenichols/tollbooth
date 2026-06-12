@@ -122,11 +122,13 @@ class Pipeline:
 
     def evaluate_request(self, call: ToolCall) -> PolicyResult:
         allow_reason: str | None = None  # rule that allowed, if any (for audit)
+        skipped: list[str] = []  # stages skipped by fail-open — must reach the audit trail
         for interceptor in self.request_interceptors:
             try:
                 result = interceptor.check_request(call)
             except Exception as exc:
                 if self._on_failure(interceptor.name, call, exc):
+                    skipped.append(interceptor.name)
                     continue
                 self._audit(
                     "request", call, Decision.DENY, f"interceptor-failure:{interceptor.name}"
@@ -143,8 +145,13 @@ class Pipeline:
                 self._audit("request", call, result.decision, result.rule_name)
                 return result
             if result.rule_name is not None:
+                # Last-writer-wins is fine while policy is the only naming
+                # interceptor; revisit when M4 adds more (audit reviewer note).
                 allow_reason = result.rule_name
-        self._audit("request", call, Decision.ALLOW, allow_reason)
+        # A degraded (fail-open) allow outranks the rule name in the audit
+        # trail: an auditor must be able to see that checks were skipped.
+        reason = f"fail-open:{','.join(skipped)}" if skipped else allow_reason
+        self._audit("request", call, Decision.ALLOW, reason)
         return PolicyResult(
             decision=Decision.ALLOW,
             rule_name=allow_reason,
@@ -152,6 +159,7 @@ class Pipeline:
         )
 
     def process_result(self, call: ToolCall, content: str) -> ResultVerdict:
+        skipped: list[str] = []
         for interceptor in self.result_interceptors:
             try:
                 content = interceptor.check_result(call, content)
@@ -168,6 +176,7 @@ class Pipeline:
                 )
             except Exception as exc:
                 if self._on_failure(interceptor.name, call, exc):
+                    skipped.append(interceptor.name)
                     continue
                 self._audit(
                     "result", call, Decision.DENY, f"interceptor-failure:{interceptor.name}"
@@ -181,4 +190,9 @@ class Pipeline:
                         "is fail-closed."
                     ),
                 )
+        # Clean pass-throughs are not audited (log volume); fail-open skips are —
+        # the audit trail must record that a check did not run. M2 note: DLP
+        # redaction (transform + allow) needs its own emission point here.
+        if skipped:
+            self._audit("result", call, Decision.ALLOW, f"fail-open:{','.join(skipped)}")
         return ResultVerdict(decision=Decision.ALLOW, content=content, message="ok")
