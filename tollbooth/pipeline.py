@@ -114,7 +114,16 @@ class Pipeline:
         self.fail_open = fail_open
         self.audit = audit
 
-    def _audit(self, path: str, call: ToolCall, decision: Decision, reason_id: str | None):
+    def _audit(
+        self,
+        path: str,
+        call: ToolCall,
+        decision: Decision,
+        reason_id: str | None,
+        *,
+        args: dict | None = None,
+        content: str | None = None,
+    ):
         if self.audit is not None:
             self.audit.decision(
                 path=path,
@@ -123,6 +132,8 @@ class Pipeline:
                 decision=str(decision),
                 reason_id=reason_id,
                 call_id=call.call_id or None,
+                args=args,
+                content=content,
             )
 
     def _on_failure(self, stage_name: str, call: ToolCall, exc: Exception) -> bool:
@@ -172,7 +183,9 @@ class Pipeline:
         # A degraded (fail-open) allow outranks the rule name in the audit
         # trail: an auditor must be able to see that checks were skipped.
         reason = f"fail-open:{','.join(skipped)}" if skipped else allow_reason
-        self._audit("request", call, Decision.ALLOW, reason)
+        # Post-enforcement payload (R10): these args are what the upstream
+        # will receive; the logger drops them unless record="full".
+        self._audit("request", call, Decision.ALLOW, reason, args=call.args)
         return PolicyResult(
             decision=Decision.ALLOW,
             rule_name=allow_reason,
@@ -216,8 +229,19 @@ class Pipeline:
                 )
         # Clean pass-throughs are not audited (log volume); fail-open skips and
         # content edits are — an auditor must see skipped checks and redactions.
+        # Full mode (R10) audits clean passes too: replay needs every result,
+        # and this content is post-enforcement (it's what the client receives).
         if skipped:
-            self._audit("result", call, Decision.ALLOW, f"fail-open:{','.join(skipped)}")
+            self._audit(
+                "result", call, Decision.ALLOW, f"fail-open:{','.join(skipped)}",
+                content=content,
+            )
         if transformed:
-            self._audit("result", call, Decision.ALLOW, f"redacted:{','.join(transformed)}")
+            self._audit(
+                "result", call, Decision.ALLOW, f"redacted:{','.join(transformed)}",
+                content=content,
+            )
+        clean = not skipped and not transformed
+        if clean and self.audit is not None and self.audit.records_content:
+            self._audit("result", call, Decision.ALLOW, None, content=content)
         return ResultVerdict(decision=Decision.ALLOW, content=content, message="ok")

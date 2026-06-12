@@ -112,7 +112,12 @@ def build_gateway(
         request_interceptors=request_interceptors,
         result_interceptors=result_interceptors,
         fail_open=(config.policy.failure_mode == "open"),
-        audit=AuditLogger(audit_stream, key=audit_key, resume=audit_resume),
+        audit=AuditLogger(
+            audit_stream,
+            key=audit_key,
+            resume=audit_resume,
+            record=config.audit.record,
+        ),
     )
     upstreams = {name: StdioUpstream(name, spec) for name, spec in config.servers.items()}
     return Gateway(upstreams=upstreams, pipeline=pipeline)

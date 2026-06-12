@@ -152,10 +152,16 @@ class AuditLogger:
         *,
         key: bytes | None = None,
         resume: tuple[int, str] | None = None,
+        record: str = "metadata",
     ):
+        if record not in ("metadata", "full"):
+            # Enum-like options raise on unknown values at construction —
+            # a typo'd mode must not silently fall back (lessons.md).
+            raise ValueError(f"unknown audit record mode {record!r}")
         self._stream = stream
         self._lock = threading.Lock()
         self._key = key  # read once here; never logged (R8)
+        self._record = record
         # One logger per gateway run, so this IS the session id (R9).
         self.session_id = uuid.uuid4().hex
         if resume is None:
@@ -176,7 +182,9 @@ class AuditLogger:
                 "session": self.session_id,
                 **fields,
             }
-            line = json.dumps(event, ensure_ascii=False)
+            # default=str: a payload value that isn't JSON-native must not
+            # crash the trail (full mode records arbitrary tool args).
+            line = json.dumps(event, ensure_ascii=False, default=str)
             self._stream.write(line + "\n")
             self._stream.flush()
             self._prev = _line_digest(line, self._key)
@@ -193,6 +201,11 @@ class AuditLogger:
             }
         )
 
+    @property
+    def records_content(self) -> bool:
+        """True in full mode (R10) — callers may emit clean-pass events too."""
+        return self._record == "full"
+
     def decision(
         self,
         *,
@@ -202,15 +215,24 @@ class AuditLogger:
         decision: str,
         reason_id: str | None,
         call_id: str | None = None,
+        args: dict | None = None,
+        content: str | None = None,
     ) -> None:
-        self._emit(
-            {
-                "event": "decision",
-                "call_id": call_id,
-                "path": path,
-                "server": server,
-                "tool": tool,
-                "decision": decision,
-                "reason_id": reason_id,
-            }
-        )
+        fields: dict = {
+            "event": "decision",
+            "call_id": call_id,
+            "path": path,
+            "server": server,
+            "tool": tool,
+            "decision": decision,
+            "reason_id": reason_id,
+        }
+        # R10: payloads land in the trail only in full mode and only for
+        # post-enforcement content — enforced HERE, not just at call sites,
+        # so no caller can record blocked traffic by accident.
+        if self._record == "full" and decision == "allow":
+            if args is not None:
+                fields["args"] = args
+            if content is not None:
+                fields["content"] = content
+        self._emit(fields)

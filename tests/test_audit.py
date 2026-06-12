@@ -472,3 +472,127 @@ class TestVerifyChain:
         head = verify_chain(log_path)
         assert head.events == 0
         assert head.seq is None
+
+
+class TestPayloadRecording:
+    """R10: payloads only in full mode, only post-enforcement."""
+
+    @staticmethod
+    def full_pipeline(stream, result_interceptors=None):
+        from tollbooth.audit import AuditLogger
+
+        return Pipeline(
+            request_interceptors=[PolicyInterceptor(rules=[], default=Decision.ALLOW)],
+            result_interceptors=result_interceptors or [],
+            audit=AuditLogger(stream, record="full"),
+        )
+
+    # R10 scenario: default records no payloads
+    def test_default_mode_records_no_argument_values(self):
+        stream = io.StringIO()
+        pipeline = make_pipeline(stream)  # metadata mode
+        pipeline.evaluate_request(
+            ToolCall(server="fs", tool="read", args={"path": "secret-arg-sentinel"})
+        )
+        [event] = events(stream)
+        assert "args" not in event
+        assert "secret-arg-sentinel" not in stream.getvalue()
+
+    # R10 scenario: full mode records post-enforcement content
+    def test_full_mode_records_args_and_redacted_result(self):
+        from tollbooth.dlp import DlpResultInterceptor
+
+        stream = io.StringIO()
+        pipeline = self.full_pipeline(stream, [DlpResultInterceptor()])
+        call = ToolCall(server="fs", tool="read", args={"path": "/tmp/x"}, call_id="c1")
+        pipeline.evaluate_request(call)
+        pipeline.process_result(call, "key AKIAIOSFODNN7EXAMPLE end")
+        request_event, result_event = events(stream)
+        assert request_event["args"] == {"path": "/tmp/x"}
+        assert "[REDACTED:aws-access-key]" in result_event["content"]
+        assert "AKIAIOSFODNN7EXAMPLE" not in stream.getvalue()
+
+    def test_full_mode_records_clean_result_content(self):
+        from tollbooth.dlp import DlpResultInterceptor
+
+        stream = io.StringIO()
+        pipeline = self.full_pipeline(stream, [DlpResultInterceptor()])
+        call = ToolCall(server="fs", tool="read", args={}, call_id="c2")
+        pipeline.process_result(call, "nothing sensitive here")
+        [event] = events(stream)
+        assert event["path"] == "result"
+        assert event["decision"] == "allow"
+        assert event["content"] == "nothing sensitive here"
+
+    def test_metadata_mode_still_skips_clean_results(self):
+        from tollbooth.dlp import DlpResultInterceptor
+
+        stream = io.StringIO()
+        pipeline = make_pipeline(stream)
+        pipeline.result_interceptors = [DlpResultInterceptor()]
+        pipeline.process_result(ToolCall(server="s", tool="t", args={}), "clean")
+        assert events(stream) == []  # log-volume choice unchanged in metadata mode
+
+    # R10 scenario: blocked request payload never recorded
+    def test_blocked_request_payload_never_recorded(self):
+        from tollbooth.audit import AuditLogger
+        from tollbooth.dlp import DlpRequestInterceptor
+
+        stream = io.StringIO()
+        pipeline = Pipeline(
+            request_interceptors=[
+                PolicyInterceptor(rules=[], default=Decision.ALLOW),
+                DlpRequestInterceptor(),
+            ],
+            audit=AuditLogger(stream, record="full"),
+        )
+        pipeline.evaluate_request(
+            ToolCall(server="web", tool="post", args={"card": "4111111111111111"})
+        )
+        [event] = events(stream)
+        assert event["decision"] == "deny"
+        assert "args" not in event
+        assert "4111111111111111" not in stream.getvalue()
+
+    def test_denied_payload_dropped_even_if_caller_passes_it(self):
+        from tollbooth.audit import AuditLogger
+
+        stream = io.StringIO()
+        logger = AuditLogger(stream, record="full")
+        logger.decision(
+            path="request",
+            server="s",
+            tool="t",
+            decision="deny",
+            reason_id="r",
+            args={"x": "denied-sentinel"},
+        )
+        assert "denied-sentinel" not in stream.getvalue()
+
+    # lessons: enum-like string options raise at construction
+    def test_unknown_record_mode_raises_at_construction(self):
+        from tollbooth.audit import AuditLogger
+
+        with pytest.raises(ValueError, match="record"):
+            AuditLogger(io.StringIO(), record="ful")
+
+    # Pattern 7: non-ASCII payloads round-trip and the chain still verifies
+    @pytest.mark.regression
+    def test_non_ascii_payload_roundtrip_chain_verifies(self, tmp_path):
+        from tollbooth.audit import AuditLogger, verify_chain
+
+        log_path = tmp_path / "audit.jsonl"
+        args = {"name": "café", "alt": "café", "tab": "a\tb"}
+        with open(log_path, "w", encoding="utf-8") as handle:
+            logger = AuditLogger(handle, record="full")
+            logger.decision(
+                path="request",
+                server="s",
+                tool="t",
+                decision="allow",
+                reason_id=None,
+                args=args,
+            )
+        [event] = [json.loads(ln) for ln in log_path.read_text().splitlines()]
+        assert event["args"] == args  # exact, unnormalized round-trip
+        assert verify_chain(log_path).events == 1
