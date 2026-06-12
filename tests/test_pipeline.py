@@ -91,6 +91,18 @@ class TestRequestPath:
             pipeline.evaluate_request(secret_call)
         assert "ghp_pipelinesecret" not in caplog.text
 
+    @pytest.mark.regression
+    def test_crash_log_never_echoes_exception_message(self, caplog):
+        """An interceptor exception that quotes an arg value must not reach logs."""
+        secret_call = ToolCall(server="s", tool="t", args={"token": "ghp_pipelinesecret"})
+        leaky = StubInterceptor("leaky", error=RuntimeError("bad arg: ghp_pipelinesecret"))
+        pipeline = Pipeline(request_interceptors=[leaky])
+        with caplog.at_level(logging.ERROR):
+            result = pipeline.evaluate_request(secret_call)
+        assert result.decision is Decision.DENY
+        assert "ghp_pipelinesecret" not in caplog.text
+        assert "RuntimeError" in caplog.text  # type stays for debugging
+
 
 class TestResultPath:
     def test_no_interceptors_passes_content_unchanged(self):
@@ -119,14 +131,27 @@ class TestResultPath:
         assert verdict.decision is Decision.DENY
         assert verdict.content is None  # original content withheld
 
-    def test_crashing_result_interceptor_fails_open_when_configured(self):
+    def test_crashing_result_interceptor_fails_open_when_configured(self, caplog):
         pipeline = Pipeline(
             result_interceptors=[StubResultInterceptor("boom", error=RuntimeError("kaput"))],
             fail_open=True,
         )
-        verdict = pipeline.process_result(CALL, "content")
+        with caplog.at_level(logging.ERROR):
+            verdict = pipeline.process_result(CALL, "content")
         assert verdict.decision is Decision.ALLOW
         assert verdict.content == "content"
+        assert "failed open" in caplog.text.lower()  # loud even when open
+
+    def test_intentional_block_survives_fail_open(self):
+        """BlockResult is a verdict, not a failure — fail-open must not bypass it."""
+        from tollbooth.pipeline import BlockResult
+
+        blocker = StubResultInterceptor("dlp", error=BlockResult("private-key-pem"))
+        pipeline = Pipeline(result_interceptors=[blocker], fail_open=True)
+        verdict = pipeline.process_result(CALL, "-----BEGIN PRIVATE KEY-----")
+        assert verdict.decision is Decision.DENY
+        assert verdict.content is None
+        assert "private-key-pem" in verdict.message
 
 
 @pytest.mark.regression

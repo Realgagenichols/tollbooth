@@ -32,6 +32,20 @@ class ResultVerdict:
     message: str
 
 
+class BlockResult(Exception):
+    """Raised by a result interceptor to INTENTIONALLY withhold a result.
+
+    Distinct from stage failure: an intentional security verdict is honored
+    even in fail-open mode (fail-open bypasses broken stages, never deliberate
+    blocks). M2's DLP per-pattern `block` override uses this.
+    """
+
+    def __init__(self, reason_id: str):
+        # reason_id is a rule/pattern identifier — never detected content.
+        super().__init__(reason_id)
+        self.reason_id = reason_id
+
+
 class RequestInterceptor(Protocol):
     name: str
 
@@ -86,9 +100,10 @@ class Pipeline:
             mode,
             call.server,
             call.tool,
-            # exc message may quote interceptor-internal state but never call
-            # args (interceptors receive them read-only); type+str is enough.
-            f"{type(exc).__name__}: {exc}",
+            # Exception TYPE only: arbitrary interceptor exceptions may echo
+            # argument/content values (e.g. ValidationError input_value) —
+            # same leak class as the config.py lesson.
+            type(exc).__name__,
         )
         return self.fail_open
 
@@ -119,6 +134,16 @@ class Pipeline:
         for interceptor in self.result_interceptors:
             try:
                 content = interceptor.check_result(call, content)
+            except BlockResult as block:
+                # Intentional verdict — honored regardless of fail_open.
+                return ResultVerdict(
+                    decision=Decision.DENY,
+                    content=None,
+                    message=(
+                        f"tollbooth: result of {call.server}/{call.tool} blocked by "
+                        f"security check {interceptor.name!r} ({block.reason_id})."
+                    ),
+                )
             except Exception as exc:
                 if self._on_failure(interceptor.name, call, exc):
                     continue
