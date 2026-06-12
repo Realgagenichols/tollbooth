@@ -88,4 +88,11 @@ dlp:
     #   requests: allow
     #   results: allow
 
-audit_log: ./tollbooth-audit.jsonl
+# Tamper-evident JSONL trail (M3): every event hash-chains to the previous
+# one — `tollbooth audit verify` detects edits/deletions/reordering, and
+# TOLLBOOTH_AUDIT_KEY (env) upgrades the chain to HMAC. `record: full`
+# additionally captures post-enforcement payloads (allowed-request args,
+# post-redaction results — never blocked traffic) for `tollbooth audit replay`.
+audit:
+  log: ./tollbooth-audit.jsonl
+  record: metadata

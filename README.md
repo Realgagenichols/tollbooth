@@ -91,13 +91,47 @@ Request actions: `block` (default) | `allow`. Result actions: `redact` (default)
 
 ## Audit log
 
-Set `audit_log: ./tollbooth-audit.jsonl` for one JSON event per decision:
+Point the trail at a file for one JSON event per decision:
+
+```yaml
+audit:
+  log: ./tollbooth-audit.jsonl
+  record: metadata        # or "full" — see below
+```
+
+(`audit_log: <path>` is the pre-M3 spelling and still works.)
 
 ```json
-{"ts": "2026-06-12T10:00:00+00:00", "path": "request", "server": "fs", "tool": "write_file", "decision": "deny", "reason_id": "block-writes-outside-project"}
+{"event": "decision", "call_id": "2a2b0cca…", "path": "request", "server": "fs", "tool": "write_file", "decision": "deny", "reason_id": "block-writes-outside-project", "v": 2, "ts": "2026-06-12T10:00:00+00:00", "seq": 5, "prev": "df412ac5…", "session": "f32a7ae3…"}
 ```
 
 DLP decisions are audited by pattern id, never value: a blocked request logs `"reason_id": "dlp:pan"`, a redacted result logs `"reason_id": "redacted:aws-access-key"`. Decisions made because a security check was skipped (fail-open) are tagged `fail-open:<stage>` — the audit trail never hides a degraded state.
+
+### Tamper evidence
+
+Every event carries a monotonic `seq` and `prev` — the SHA-256 of the previous log line — so edits, deletions, and reordering break the chain, which also spans gateway restarts:
+
+```bash
+tollbooth audit verify --log tollbooth-audit.jsonl
+# OK: 10 event(s), head seq=9 hash=0a8e09b2…, mode=sha256 (unkeyed)
+```
+
+Record the reported head externally: a log truncated back to an earlier event still verifies on its own, but won't match your recorded head. Set `TOLLBOOTH_AUDIT_KEY` (environment variable, never a flag) to upgrade the chain to HMAC-SHA-256 — then an attacker who can rewrite the whole file still can't forge a valid chain without the key. Verification exit codes: `0` clean, `1` tamper/unreadable finding, `2` usage error.
+
+### Payload recording & session replay
+
+By default (`record: metadata`) no argument or result values are ever written. `record: full` additionally records **post-enforcement** payloads only: arguments of allowed requests and result content *after* redaction — exactly what crossed the boundary. Denied or blocked traffic never has payloads recorded, enforced inside the logger itself.
+
+Each gateway run is a session (with a session-start event carrying the gateway version and a config *digest*, never config contents). Query and replay the trail:
+
+```bash
+# Filtered events as JSONL — by server, tool, decision, session, time window
+tollbooth audit query --log audit.jsonl --decision deny --since 2026-06-12T00:00:00
+
+# Chronological timeline of one session; renders payloads when recorded,
+# degrades to a decision timeline on metadata-only logs
+tollbooth audit replay <session-id> --log audit.jsonl
+```
 
 ## Development
 
