@@ -86,6 +86,23 @@ class GatewayConfig(BaseModel):
     audit_log: str | None = None
 
 
+def _validate_gateway_config(raw: object, source: str) -> GatewayConfig:
+    """Validate raw data into a GatewayConfig with a sanitized error.
+
+    Pattern 11 applies per model_validate CALL SITE: the raw ValidationError
+    rendering includes input_value, which would echo secrets from env blocks.
+    Every validation of external input must go through this helper.
+    """
+    try:
+        return GatewayConfig.model_validate(raw)
+    except ValidationError as exc:
+        details = "; ".join(
+            f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+            for err in exc.errors(include_input=False, include_url=False)
+        )
+        raise ConfigError(f"invalid {source}: {details}") from exc
+
+
 def load_config(path: str | Path) -> GatewayConfig:
     """Load and validate a tollbooth.yaml. Raises ConfigError with a clear message."""
     path = Path(path)
@@ -104,16 +121,7 @@ def load_config(path: str | Path) -> GatewayConfig:
     if not isinstance(raw, dict):
         raise ConfigError(f"malformed YAML in {path}: top level must be a mapping")
 
-    try:
-        config = GatewayConfig.model_validate(raw)
-    except ValidationError as exc:
-        # Never interpolate the raw ValidationError: its default rendering
-        # includes input_value, which would echo secrets from env blocks.
-        details = "; ".join(
-            f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
-            for err in exc.errors(include_input=False, include_url=False)
-        )
-        raise ConfigError(f"invalid config {path}: {details}") from exc
+    config = _validate_gateway_config(raw, source=f"config {path}")
 
     for rule in config.policy.rules:
         if rule.server != "*" and rule.server not in config.servers:
@@ -142,7 +150,8 @@ def import_client_config(path: str | Path) -> tuple[GatewayConfig, list[str]]:
         # JSONDecodeError messages are coordinates only — safe to interpolate.
         raise ConfigError(f"malformed JSON in {path}: {exc}") from exc
 
-    entries = raw.get("mcpServers", raw.get("servers")) if isinstance(raw, dict) else None
+    # `or` (not .get default) so an empty mcpServers falls through to servers.
+    entries = (raw.get("mcpServers") or raw.get("servers")) if isinstance(raw, dict) else None
     if not isinstance(entries, dict) or not entries:
         raise ConfigError(
             f"no MCP servers found in {path}: expected a non-empty "
@@ -163,13 +172,14 @@ def import_client_config(path: str | Path) -> tuple[GatewayConfig, list[str]]:
     if not servers:
         raise ConfigError(f"no stdio servers in {path}: all entries lack a 'command'")
 
-    config = GatewayConfig.model_validate(
+    config = _validate_gateway_config(
         {
             # Permissive starter: everything allowed, DLP on — tighten from here.
             "servers": servers,
             "policy": {"default": "allow", "rules": []},
             "dlp": {"enabled": True},
-        }
+        },
+        source=f"server entries in {path}",
     )
     return config, skipped
 

@@ -3,8 +3,10 @@
 import argparse
 import json
 import logging
+import os
 import sys
 from contextlib import ExitStack
+from pathlib import Path
 from typing import TextIO
 
 import anyio
@@ -132,14 +134,20 @@ def cmd_emit_config(config_path: str) -> int:
 
 
 def cmd_import(client_config_path: str, output: str) -> int:
-    from pathlib import Path
-
     out_path = Path(output)
     if out_path.exists():
         # Never clobber an existing gateway config — it IS the security boundary.
         raise ConfigError(f"refusing to overwrite existing {out_path}; move it first")
     config, skipped = import_client_config(client_config_path)
-    out_path.write_text(render_starter_yaml(config), encoding="utf-8")
+    try:
+        # O_EXCL closes the check-then-write race; 0600 because the file may
+        # carry env-block secrets copied from the client config.
+        fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(render_starter_yaml(config))
+    except OSError as exc:
+        # Path-only message; OSError on open/write never echoes file contents.
+        raise ConfigError(f"cannot write {out_path}: {exc}") from exc
     print(f"wrote {out_path}: {len(config.servers)} upstream server(s), dlp=on")
     for name in skipped:
         print(f"skipped {name!r}: no command (non-stdio servers land in N1)", file=sys.stderr)

@@ -272,3 +272,45 @@ class TestImport:
         assert code == 2
         assert "refusing to overwrite" in capsys.readouterr().err
         assert out.read_text() == "# precious existing config\n"
+
+    # Section-4 review C1: malformed SHAPE (valid JSON) must produce a clean
+    # exit-2 error that never echoes input values (pydantic input_value leak).
+    @pytest.mark.regression
+    def test_malformed_shape_never_echoes_values(self, monkeypatch, capsys, tmp_path):
+        client = self.write_client_config(
+            tmp_path,
+            {"mcpServers": {"fs": {"command": "fs-server", "args": "--token sk_live_LEAK"}}},
+        )
+        out = tmp_path / "out.yaml"
+        code = run_cli(monkeypatch, "import", str(client), "-o", str(out))
+        assert code == 2
+        captured = capsys.readouterr()
+        assert "sk_live_LEAK" not in captured.err + captured.out
+        assert "args" in captured.err  # location stays actionable
+        assert not out.exists()
+
+    # Section-4 review W1: unwritable output is a clean config error, not a traceback
+    @pytest.mark.regression
+    def test_unwritable_output_clear_error(self, monkeypatch, capsys, tmp_path):
+        client = self.write_client_config(tmp_path)
+        out = tmp_path / "no-such-dir" / "out.yaml"
+        code = run_cli(monkeypatch, "import", str(client), "-o", str(out))
+        assert code == 2
+        assert "cannot write" in capsys.readouterr().err
+
+    def test_output_file_is_owner_only(self, monkeypatch, tmp_path):
+        # The generated file may carry env-block secrets from the client config.
+        client = self.write_client_config(tmp_path)
+        out = tmp_path / "out.yaml"
+        run_cli(monkeypatch, "import", str(client), "-o", str(out))
+        assert (out.stat().st_mode & 0o777) == 0o600
+
+    def test_empty_mcpservers_falls_back_to_servers_key(self, monkeypatch, tmp_path):
+        from tollbooth.config import load_config
+
+        client = self.write_client_config(
+            tmp_path, {"mcpServers": {}, "servers": {"fs": {"command": "fs-server"}}}
+        )
+        out = tmp_path / "out.yaml"
+        assert run_cli(monkeypatch, "import", str(client), "-o", str(out)) == 0
+        assert set(load_config(out).servers) == {"fs"}
