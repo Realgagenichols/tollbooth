@@ -147,20 +147,20 @@ async def _serve(
 
 def _open_audit_stream(config: GatewayConfig, stack: ExitStack) -> TextIO:
     """Audit destination: append-mode JSONL file, or stderr when unset."""
-    if config.audit_log is None:
+    if config.audit.log is None:
         return sys.stderr
     try:
-        return stack.enter_context(open(config.audit_log, "a", encoding="utf-8"))  # noqa: SIM115
+        return stack.enter_context(open(config.audit.log, "a", encoding="utf-8"))  # noqa: SIM115
     except OSError as exc:
         # Path-only message; OSError on open never echoes file contents.
-        raise ConfigError(f"cannot open audit log {config.audit_log}: {exc}") from exc
+        raise ConfigError(f"cannot open audit log {config.audit.log}: {exc}") from exc
 
 
 def cmd_run(config_path: str) -> int:
     config = load_config(config_path)
     # Seed the chain from an existing log BEFORE opening it for append, so the
     # chain spans gateway restarts (R8).
-    audit_resume = tail_state(config.audit_log) if config.audit_log else None
+    audit_resume = tail_state(config.audit.log) if config.audit.log else None
     with ExitStack() as stack:
         audit_stream = _open_audit_stream(config, stack)
         try:

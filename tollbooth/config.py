@@ -76,14 +76,38 @@ class DlpConfig(BaseModel):
         return {p: o.results for p, o in self.overrides.items() if o.results is not None}
 
 
+class AuditConfig(BaseModel):
+    """The audit: block (S1, R10).
+
+    record="full" additionally records POST-ENFORCEMENT payloads: arguments
+    of allowed requests and result content after redaction — never blocked
+    traffic. The default records no argument/result values at all.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # JSONL destination; None = stderr alongside the log lines.
+    log: str | None = None
+    record: Literal["metadata", "full"] = "metadata"
+
+
 class GatewayConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     servers: dict[str, UpstreamConfig]
     policy: PolicyConfig = PolicyConfig()
     dlp: DlpConfig = DlpConfig()
-    # JSONL audit destination (S1); None = stderr alongside the log lines.
+    audit: AuditConfig = AuditConfig()
+    # Pre-M3 alias for audit.log; normalized below, rejected if both are set.
     audit_log: str | None = None
+
+    @model_validator(mode="after")
+    def _normalize_audit_log(self) -> "GatewayConfig":
+        if self.audit_log is not None:
+            if self.audit.log is not None:
+                raise ValueError("set audit.log or audit_log, not both")
+            self.audit.log = self.audit_log
+        return self
 
 
 def _validate_gateway_config(raw: object, source: str) -> GatewayConfig:

@@ -181,3 +181,37 @@ class TestDlpConfig:
         text = VALID_CONFIG + "dlp:\n  overrides:\n    pan:\n      requests: redact\n"
         with pytest.raises(ConfigError, match="pan"):
             load_config(write_config(tmp_path, text))
+
+
+class TestAuditConfig:
+    """R10: the audit: block — log path, record mode, audit_log back-compat."""
+
+    def test_defaults_metadata_and_no_log(self, tmp_path):
+        config = load_config(write_config(tmp_path, VALID_CONFIG))
+        assert config.audit.log is None
+        assert config.audit.record == "metadata"
+
+    def test_audit_block_parsed(self, tmp_path):
+        text = VALID_CONFIG + "audit:\n  log: /tmp/audit.jsonl\n  record: full\n"
+        config = load_config(write_config(tmp_path, text))
+        assert config.audit.log == "/tmp/audit.jsonl"
+        assert config.audit.record == "full"
+
+    def test_legacy_audit_log_normalizes_into_audit_block(self, tmp_path):
+        text = VALID_CONFIG + "audit_log: /tmp/audit.jsonl\n"
+        config = load_config(write_config(tmp_path, text))
+        assert config.audit.log == "/tmp/audit.jsonl"
+        assert config.audit.record == "metadata"
+
+    def test_both_audit_log_and_audit_block_rejected(self, tmp_path):
+        text = VALID_CONFIG + (
+            "audit_log: /tmp/a.jsonl\naudit:\n  log: /tmp/b.jsonl\n"
+        )
+        with pytest.raises(ConfigError, match="audit"):
+            load_config(write_config(tmp_path, text))
+
+    # lessons: enum-like string options raise on unknown values at load
+    def test_typoed_record_mode_rejected_at_startup(self, tmp_path):
+        text = VALID_CONFIG + "audit:\n  record: ful\n"
+        with pytest.raises(ConfigError, match="record"):
+            load_config(write_config(tmp_path, text))
