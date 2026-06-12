@@ -58,6 +58,8 @@ class StdioUpstream:
             # configs only declare what's specific to the server.
             env={**get_default_environment(), **self.config.env},
         )
+        if self._stack is not None:
+            raise UpstreamError(f"upstream {self.name!r} is already running")
         self._stack = AsyncExitStack()
         try:
             # NOTE: the context managers must NOT be entered inside a cancel
@@ -89,8 +91,16 @@ class StdioUpstream:
         return self._session
 
     async def list_tools(self) -> list[types.Tool]:
-        result = await self._require_session().list_tools()
-        return result.tools
+        # Follow pagination: R1 promises the UNION of upstream tools.
+        session = self._require_session()
+        tools: list[types.Tool] = []
+        cursor: str | None = None
+        while True:
+            result = await session.list_tools(cursor=cursor)
+            tools.extend(result.tools)
+            cursor = result.nextCursor
+            if cursor is None:
+                return tools
 
     async def call_tool(self, tool: str, args: dict[str, object]) -> types.CallToolResult:
         return await self._require_session().call_tool(tool, args)

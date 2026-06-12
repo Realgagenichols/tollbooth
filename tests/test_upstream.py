@@ -30,6 +30,26 @@ async def test_forwards_tool_call(make_upstream_config):
         await upstream.aclose()
 
 
+async def test_call_after_aclose_raises_not_running(make_upstream_config):
+    """Section 7's dies-mid-session handling relies on this error path."""
+    upstream = StdioUpstream("echo", make_upstream_config())
+    await upstream.start()
+    await upstream.aclose()
+    with pytest.raises(UpstreamError, match="not running"):
+        await upstream.call_tool("echo", {"text": "hi"})
+
+
+async def test_double_start_rejected(make_upstream_config):
+    """A second start() must not orphan the first subprocess."""
+    upstream = StdioUpstream("echo", make_upstream_config())
+    try:
+        await upstream.start()
+        with pytest.raises(UpstreamError, match="already running"):
+            await upstream.start()
+    finally:
+        await upstream.aclose()
+
+
 # R1 scenario: upstream server fails to start
 async def test_missing_command_raises_clear_error(make_upstream_config):
     upstream = StdioUpstream(
