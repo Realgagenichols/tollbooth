@@ -112,6 +112,26 @@ class TestPatternLibrary:
     def test_pem_header_alone_detected(self):
         assert ids(scan("-----BEGIN OPENSSH PRIVATE KEY-----")) == ["private-key-pem"]
 
+    # Section-review findings, pinned so the regexes don't regress:
+    @pytest.mark.regression
+    def test_review_findings_detected(self):
+        # 2-series Mastercard BIN (issued since 2017), Luhn-valid
+        assert ids(scan("card 2221000000000009")) == ["pan"]
+        # Encrypted PKCS#8 key (standard openssl output)
+        assert ids(scan("-----BEGIN ENCRYPTED PRIVATE KEY-----")) == ["private-key-pem"]
+        # Redis URL with empty username — still a live credential
+        assert ids(scan("redis://:s3cretpass@cache.internal:6379/0")) == ["connection-string"]
+        # pwd=value is a credential assignment (pwd: is shell noise, below)
+        assert ids(scan("pwd=hunter22secret")) == ["password-assignment"]
+
+    @pytest.mark.regression
+    def test_detection_repr_never_carries_value(self):
+        # Tripwire: a future refactor adding a value field to Detection would
+        # silently violate "detected values never appear in logs" (R6, S1).
+        text = f"key {AWS_KEY} and card {VISA}"
+        assert AWS_KEY not in repr(scan(text))
+        assert VISA not in repr(scan(text))
+
     def test_full_pem_block_span_covers_key_material(self):
         # The span must swallow the body: redacting only the header would
         # pass the actual key material through (R7).
@@ -143,6 +163,9 @@ class TestFalsePositiveCorpus:
             "db at postgres://localhost:5432/app",  # no credentials in URL
             "listening on 192.168.100.200:8080",
             "meeting 2026-06-12 from 10:30-12:45",
+            "pwd: /var/lib/jenkins/workspace",  # shell working directory, not a password
+            "pwd: ignoring non-option arguments",  # command output prefixed by its name
+
         ],
     )
     def test_benign_content_not_flagged(self, text):

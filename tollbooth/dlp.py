@@ -63,11 +63,12 @@ def _assignment_value_is_real(match: str) -> bool:
     return not _PLACEHOLDER.match(value)
 
 
-# PAN brand formats (Visa / Mastercard / Amex / Discover), Luhn-gated.
+# PAN brand formats (Visa / Mastercard incl. 2-series / Amex / Discover), Luhn-gated.
 _PAN = (
     r"\b(?:"
     r"4\d{3}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}"
     r"|5[1-5]\d{2}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}"
+    r"|2(?:22[1-9]|2[3-9]\d|[3-6]\d{2}|7[01]\d|720)[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}"
     r"|6(?:011|5\d{2})[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}"
     r"|3[47]\d{2}[\s-]?\d{6}[\s-]?\d{5}"
     r")\b"
@@ -75,7 +76,7 @@ _PAN = (
 
 # The optional body group makes a full PEM block one detection, so redaction
 # covers the key material, not just the header line.
-_PEM_KIND = r"(?:RSA\s+|DSA\s+|EC\s+|OPENSSH\s+)?"
+_PEM_KIND = r"(?:RSA\s+|DSA\s+|EC\s+|OPENSSH\s+|ENCRYPTED\s+)?"
 _PRIVATE_KEY = (
     rf"-----BEGIN\s+{_PEM_KIND}PRIVATE\s+KEY-----"
     rf"(?:[\s\S]*?-----END\s+{_PEM_KIND}PRIVATE\s+KEY-----)?"
@@ -102,7 +103,7 @@ PATTERNS: list[Pattern] = [
         # Credentials (user:pass@) required: a plain DB URL is not sensitive.
         re.compile(
             r"(?i)\b(?:jdbc:)?(?:mongodb(?:\+srv)?|mysql|postgres(?:ql)?|redis|amqp|mssql)"
-            r"://[^\s/@:]+:[^\s@]+@\S+"
+            r"://[^\s/@:]*:[^\s@]+@\S+"
         ),
         2,
     ),
@@ -122,7 +123,9 @@ PATTERNS: list[Pattern] = [
     ),
     Pattern(
         "password-assignment",
-        re.compile(r"(?i)(?:password|passwd|pwd)\s*[=:]\s*['\"]?[^\s'\"]{8,}"),
+        # `pwd:` is shell-output noise (the command, working dirs) — pwd only
+        # counts with `=`; password/passwd accept `=` or `:`.
+        re.compile(r"(?i)(?:(?:password|passwd)\s*[=:]|pwd\s*=)\s*['\"]?[^\s'\"]{8,}"),
         1,
         validator=_assignment_value_is_real,
     ),
