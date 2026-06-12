@@ -84,6 +84,9 @@ def _matcher_matches(matcher: Matcher, value: object) -> bool:
     if matcher.equals is not None:
         return text == _normalize(matcher.equals)
     if matcher.regex is not None:
+        # The pattern is matched as written (not normalized): normalizing a
+        # pattern string could alter character-class semantics. Config is
+        # trusted and editors emit NFC, so only the argument text is normalized.
         return re.search(matcher.regex, text) is not None
     if matcher.prefix is not None:
         return text.startswith(_normalize(matcher.prefix))
