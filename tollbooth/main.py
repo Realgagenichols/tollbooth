@@ -11,7 +11,7 @@ from typing import TextIO
 
 import anyio
 
-from tollbooth.audit import AuditLogger
+from tollbooth.audit import AuditError, AuditLogger, audit_key_from_env, tail_state
 from tollbooth.config import (
     ConfigError,
     GatewayConfig,
@@ -61,7 +61,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_gateway(config: GatewayConfig, audit_stream: TextIO) -> Gateway:
+def build_gateway(
+    config: GatewayConfig,
+    audit_stream: TextIO,
+    *,
+    audit_key: bytes | None = None,
+    audit_resume: tuple[int, str] | None = None,
+) -> Gateway:
     """Wire config into the runtime object graph (pipeline, upstreams, gateway)."""
     request_interceptors: list = [
         PolicyInterceptor(rules=config.policy.rules, default=config.policy.default)
@@ -75,14 +81,21 @@ def build_gateway(config: GatewayConfig, audit_stream: TextIO) -> Gateway:
         request_interceptors=request_interceptors,
         result_interceptors=result_interceptors,
         fail_open=(config.policy.failure_mode == "open"),
-        audit=AuditLogger(audit_stream),
+        audit=AuditLogger(audit_stream, key=audit_key, resume=audit_resume),
     )
     upstreams = {name: StdioUpstream(name, spec) for name, spec in config.servers.items()}
     return Gateway(upstreams=upstreams, pipeline=pipeline)
 
 
-async def _serve(config: GatewayConfig, audit_stream: TextIO) -> None:
-    gateway = build_gateway(config, audit_stream)
+async def _serve(
+    config: GatewayConfig,
+    audit_stream: TextIO,
+    audit_key: bytes | None,
+    audit_resume: tuple[int, str] | None,
+) -> None:
+    gateway = build_gateway(
+        config, audit_stream, audit_key=audit_key, audit_resume=audit_resume
+    )
     try:
         await gateway.start_upstreams()
         log.info("gateway up: %d upstream(s), %d rule(s)",
@@ -105,10 +118,13 @@ def _open_audit_stream(config: GatewayConfig, stack: ExitStack) -> TextIO:
 
 def cmd_run(config_path: str) -> int:
     config = load_config(config_path)
+    # Seed the chain from an existing log BEFORE opening it for append, so the
+    # chain spans gateway restarts (R8).
+    audit_resume = tail_state(config.audit_log) if config.audit_log else None
     with ExitStack() as stack:
         audit_stream = _open_audit_stream(config, stack)
         try:
-            anyio.run(_serve, config, audit_stream)
+            anyio.run(_serve, config, audit_stream, audit_key_from_env(), audit_resume)
         except UpstreamError as exc:
             print(f"tollbooth: {exc}", file=sys.stderr)
             return 1
@@ -171,7 +187,7 @@ def main() -> None:
         else:
             commands = {"run": cmd_run, "validate": cmd_validate, "emit-config": cmd_emit_config}
             code = commands[args.command](args.config)
-    except ConfigError as exc:
+    except (ConfigError, AuditError) as exc:
         print(f"tollbooth: {exc}", file=sys.stderr)
         sys.exit(2)
     sys.exit(code)

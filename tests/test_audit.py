@@ -222,3 +222,39 @@ class TestChain:
         assert audit_key_from_env() is None
         monkeypatch.setenv("TOLLBOOTH_AUDIT_KEY", "hunter2")
         assert audit_key_from_env() == b"hunter2"
+
+
+class TestChainResume:
+    """R8: appending to an existing log seeds the chain from its last line."""
+
+    def test_chain_resumes_across_reopen(self, tmp_path):
+        from tollbooth.audit import tail_state
+
+        log_path = tmp_path / "audit.jsonl"
+        with open(log_path, "w", encoding="utf-8") as handle:
+            emit_decisions(AuditLogger(handle), 2)
+        with open(log_path, "a", encoding="utf-8") as handle:
+            emit_decisions(AuditLogger(handle, resume=tail_state(log_path)), 1)
+
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        assert [json.loads(ln)["seq"] for ln in lines] == [0, 1, 2]
+        third = json.loads(lines[2])
+        assert third["prev"] == hashlib.sha256(lines[1].encode("utf-8")).hexdigest()
+
+    def test_tail_state_missing_or_empty_file(self, tmp_path):
+        from tollbooth.audit import tail_state
+
+        assert tail_state(tmp_path / "absent.jsonl") is None
+        empty = tmp_path / "empty.jsonl"
+        empty.touch()
+        assert tail_state(empty) is None
+
+    def test_malformed_last_line_raises_without_echoing_content(self, tmp_path):
+        from tollbooth.audit import AuditError, tail_state
+
+        log_path = tmp_path / "audit.jsonl"
+        log_path.write_text('{"not-an-event": "sentinel-payload-xyz"\n', encoding="utf-8")
+        with pytest.raises(AuditError) as excinfo:
+            tail_state(log_path)
+        assert "sentinel-payload-xyz" not in str(excinfo.value)
+        assert "audit.jsonl" in str(excinfo.value)

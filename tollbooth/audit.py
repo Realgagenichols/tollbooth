@@ -13,6 +13,7 @@ import json
 import os
 import threading
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TextIO
 
 SCHEMA_VERSION = 2
@@ -20,6 +21,39 @@ SCHEMA_VERSION = 2
 # event still verifies — end-truncation is detected by comparing the chain
 # head reported by `verify` against an externally recorded head.
 GENESIS = "genesis"
+
+
+class AuditError(Exception):
+    """Audit trail problem (unreadable/invalid log). Messages carry the path
+    and location, never line contents — a log fed back to us is external
+    input that may embed payloads (Pattern 11)."""
+
+
+def tail_state(path: str | Path) -> tuple[int, str] | None:
+    """(seq, raw line) of the last event in an existing log, or None if the
+    file is missing or empty. Used to seed the chain when appending (R8)."""
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise AuditError(f"cannot read audit log {path}: {exc}") from exc
+    lines = text.splitlines()
+    if not lines:
+        return None
+    last = lines[-1]
+    try:
+        seq = json.loads(last)["seq"]
+        if not isinstance(seq, int):
+            raise KeyError("seq")
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        # Line number + path only — never the line itself (Pattern 11).
+        raise AuditError(
+            f"cannot resume audit chain: {path} line {len(lines)} "
+            "is not a valid audit event"
+        ) from exc
+    return seq, last
 
 
 def audit_key_from_env() -> bytes | None:
@@ -43,12 +77,23 @@ class AuditLogger:
     chain (R8). seq/prev state is guarded by the same lock that serializes
     writes — concurrent tool calls share one stream (Pattern 8)."""
 
-    def __init__(self, stream: TextIO, *, key: bytes | None = None):
+    def __init__(
+        self,
+        stream: TextIO,
+        *,
+        key: bytes | None = None,
+        resume: tuple[int, str] | None = None,
+    ):
         self._stream = stream
         self._lock = threading.Lock()
         self._key = key  # read once here; never logged (R8)
-        self._seq = 0
-        self._prev = GENESIS
+        if resume is None:
+            self._seq = 0
+            self._prev = GENESIS
+        else:
+            last_seq, last_line = resume
+            self._seq = last_seq + 1
+            self._prev = _line_digest(last_line, key)
 
     def _emit(self, fields: dict) -> None:
         with self._lock:
