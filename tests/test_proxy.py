@@ -460,3 +460,45 @@ class TestEmbeddedResources:
         assert result.isError is False
         [block] = result.content
         assert block.resource.blob == "QUtJQUlPU0ZPRE5ON0VYQU1QTEU="
+
+
+# Section-5 review hardening: mixed content lists — every surface scanned
+async def test_mixed_text_and_embedded_blocks_both_scanned():
+    class MixedFake:
+        name = "docs"
+
+        async def start(self):
+            pass
+
+        async def list_tools(self):
+            return [
+                types.Tool(
+                    name="fetch",
+                    inputSchema={"type": "object", "additionalProperties": True},
+                )
+            ]
+
+        async def call_tool(self, tool, args):
+            return types.CallToolResult(
+                content=[
+                    types.TextContent(type="text", text="a AKIAIOSFODNN7EXAMPLE"),
+                    types.EmbeddedResource(
+                        type="resource",
+                        resource=types.TextResourceContents(
+                            uri="file:///tmp/x", text="b AKIAIOSFODNN7EXAMPLE"
+                        ),
+                    ),
+                ],
+                isError=False,
+            )
+
+        async def aclose(self):
+            pass
+
+    gateway = make_dlp_gateway(MixedFake())
+    async with create_connected_server_and_client_session(gateway.server) as client:
+        result = await client.call_tool("docs_fetch", {})
+    assert result.isError is False
+    text_block, embedded = result.content
+    assert text_block.text == "a [REDACTED:aws-access-key]"
+    assert embedded.resource.text == "b [REDACTED:aws-access-key]"

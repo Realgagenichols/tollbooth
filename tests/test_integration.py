@@ -262,3 +262,77 @@ async def test_concurrent_calls_no_redaction_bleed(tmp_path):
     for n in range(20):
         expected = f"file {n}: ssn [REDACTED:ssn]" if n % 2 == 0 else f"file {n}: clean"
         assert results[n] == expected
+
+
+M3_CONFIG = """
+servers:
+  fs:
+    command: unused-here
+policy:
+  default: allow
+  rules:
+    - name: no-writes
+      action: deny
+      server: fs
+      tool: write_file
+audit:
+  record: full
+"""
+
+
+async def test_m3_audit_trail_end_to_end(tmp_path):
+    """R8+R9+R10+R11: one session — chain verifies, query filters, replay
+    renders payloads, and raw secrets never reach the log."""
+    from tollbooth.audit import query_events, replay_session, verify_chain
+    from tollbooth.main import _config_digest
+
+    config_path = tmp_path / "tollbooth.yaml"
+    config_path.write_text(M3_CONFIG, encoding="utf-8")
+    config = load_config(config_path)
+
+    leaky = FakeUpstream(
+        "fs",
+        {
+            "read_file": lambda args: f"key AKIAIOSFODNN7EXAMPLE in {args['path']}",
+            "write_file": lambda args: "ok",
+        },
+    )
+    log_path = tmp_path / "audit.jsonl"
+    with open(log_path, "w", encoding="utf-8") as audit_stream:
+        gateway = build_gateway(config, audit_stream=audit_stream)
+        gateway.upstreams = {"fs": leaky}
+        logger = gateway.pipeline.audit
+        logger.session_start(
+            gateway_version="test", config_digest=_config_digest(config)
+        )
+        async with create_connected_server_and_client_session(gateway.server) as client:
+            redacted = await client.call_tool("fs_read_file", {"path": "/project/a"})
+            denied = await client.call_tool("fs_write_file", {"path": "/etc/passwd"})
+
+    assert "[REDACTED:aws-access-key]" in redacted.content[0].text
+    assert denied.isError is True
+
+    # R8: the whole session chains and verifies
+    head = verify_chain(log_path)
+    assert head.events >= 4  # session-start, request, redaction, deny
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "AKIAIOSFODNN7EXAMPLE" not in log_text  # R10: post-enforcement only
+
+    # R9: every event carries the session; request/result correlate
+    session = logger.session_id
+    session_events = query_events(log_path, session=session)
+    assert len(session_events) == head.events
+    read_events_ = query_events(log_path, tool="read_file")
+    call_ids = {e["call_id"] for e in read_events_}
+    assert len(call_ids) == 1  # request + redacted result share one call id
+
+    # R11: query filters; replay renders the timeline with recorded payloads
+    [deny_event] = query_events(log_path, decision="deny")
+    assert deny_event["reason_id"] == "no-writes"
+    assert "args" not in deny_event  # denied traffic never carries payloads
+    timeline = replay_session(log_path, session)
+    assert "fs/read_file" in timeline
+    assert "/project/a" in timeline  # recorded args rendered (full mode)
+    assert "[REDACTED:aws-access-key]" in timeline
+    assert "no-writes" in timeline
+    assert "AKIAIOSFODNN7EXAMPLE" not in timeline
