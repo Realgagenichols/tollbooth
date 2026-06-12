@@ -4,7 +4,7 @@ import logging
 
 import pytest
 
-from tollbooth.pipeline import Pipeline, ToolCall
+from tollbooth.pipeline import Pipeline, ResultEdit, ToolCall
 from tollbooth.policy import Decision, PolicyResult
 
 
@@ -34,8 +34,8 @@ class StubResultInterceptor:
         if self.error is not None:
             raise self.error
         if self.transform is not None:
-            return self.transform(content)
-        return content
+            return ResultEdit(content=self.transform(content), reason_ids=(self.name,))
+        return ResultEdit(content=content)
 
 
 CALL = ToolCall(server="fs", tool="read_file", args={"path": "/tmp/x"})
@@ -152,6 +152,73 @@ class TestResultPath:
         assert verdict.decision is Decision.DENY
         assert verdict.content is None
         assert "private-key-pem" in verdict.message
+
+
+class TestDlpInPipeline:
+    """R7 interceptors running on the real pipeline (R4 interactions)."""
+
+    # R7 scenario (per-pattern override) + lesson: fail-open must not bypass
+    # intentional verdicts — a configured DLP block is a decision, not a failure.
+    def test_dlp_block_override_survives_fail_open(self):
+        from tollbooth.dlp import DlpResultInterceptor
+
+        dlp = DlpResultInterceptor(overrides={"private-key-pem": "block"})
+        pipeline = Pipeline(result_interceptors=[dlp], fail_open=True)
+        verdict = pipeline.process_result(CALL, "-----BEGIN RSA PRIVATE KEY-----")
+        assert verdict.decision is Decision.DENY
+        assert verdict.content is None
+        assert "private-key-pem" in verdict.message
+
+    # R4 scenario: redaction failure blocks the result
+    def test_redaction_failure_blocks_result(self, monkeypatch, caplog):
+        import tollbooth.dlp
+        from tollbooth.dlp import DlpResultInterceptor
+
+        def broken_scan(text, patterns=None):
+            raise RuntimeError("redaction backend down")
+
+        monkeypatch.setattr(tollbooth.dlp, "scan", broken_scan)
+        pipeline = Pipeline(result_interceptors=[DlpResultInterceptor()])
+        with caplog.at_level(logging.ERROR):
+            verdict = pipeline.process_result(CALL, "key AKIAIOSFODNN7EXAMPLE here")
+        assert verdict.decision is Decision.DENY
+        assert verdict.content is None  # never passed through unredacted
+
+    @pytest.mark.regression
+    def test_sentinel_secret_never_leaks_anywhere(self, caplog):
+        """Cross-cutting Pattern 11: run a sentinel secret through the request-
+        block and result-redact paths; it must not surface in any log record,
+        audit line, error message, or returned content."""
+        import io
+
+        from tollbooth.audit import AuditLogger
+        from tollbooth.dlp import DlpRequestInterceptor, DlpResultInterceptor
+
+        sentinel = "AKIASENTINELSENTINEL"  # matches aws-access-key
+        stream = io.StringIO()
+        pipeline = Pipeline(
+            request_interceptors=[DlpRequestInterceptor()],
+            result_interceptors=[DlpResultInterceptor()],
+            audit=AuditLogger(stream),
+        )
+        with caplog.at_level(logging.DEBUG):
+            request_verdict = pipeline.evaluate_request(
+                ToolCall(server="s", tool="t", args={"note": f"key {sentinel}"})
+            )
+            result_verdict = pipeline.process_result(CALL, f"found {sentinel} in env")
+        assert request_verdict.decision is Decision.DENY
+        assert result_verdict.content == "found [REDACTED:aws-access-key] in env"
+        for surface in (
+            request_verdict.message,
+            result_verdict.message,
+            result_verdict.content,
+            caplog.text,
+            stream.getvalue(),
+        ):
+            assert sentinel not in surface
+        # The audit trail stays actionable: pattern ids present.
+        assert "dlp:aws-access-key" in stream.getvalue()
+        assert "redacted:aws-access-key" in stream.getvalue()
 
 
 @pytest.mark.regression

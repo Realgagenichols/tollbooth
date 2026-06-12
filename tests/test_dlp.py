@@ -7,6 +7,7 @@ direction-aware actions (R7) are covered in test_pipeline.py.
 import pytest
 
 from tollbooth.dlp import Detection, luhn_check, scan
+from tollbooth.policy import Decision
 
 # Industry-standard test card numbers (Luhn-valid, never real accounts).
 VISA = "4111111111111111"
@@ -170,6 +171,87 @@ class TestFalsePositiveCorpus:
     )
     def test_benign_content_not_flagged(self, text):
         assert scan(text) == []
+
+
+class TestDlpRequestInterceptor:
+    def check(self, args, overrides=None):
+        from tollbooth.dlp import DlpRequestInterceptor
+        from tollbooth.pipeline import ToolCall
+
+        interceptor = DlpRequestInterceptor(overrides=overrides)
+        return interceptor.check_request(ToolCall(server="crm", tool="update", args=args))
+
+    # R7 scenario: request with secret is blocked — pattern named, value never echoed
+    def test_pan_in_args_blocked_without_echoing_value(self):
+        result = self.check({"card": VISA})
+        assert result.decision is Decision.DENY
+        assert "pan" in result.message
+        assert VISA not in result.message
+        assert VISA not in (result.rule_name or "")
+
+    def test_nested_args_are_scanned(self):
+        result = self.check({"meta": {"notes": [f"aws key {AWS_KEY}"]}})
+        assert result.decision is Decision.DENY
+        assert "aws-access-key" in result.message
+
+    def test_numeric_leaf_is_scanned(self):
+        # A PAN arriving as a JSON number must not slip past the walk.
+        result = self.check({"card_number": int(VISA)})
+        assert result.decision is Decision.DENY
+
+    def test_clean_args_allowed(self):
+        result = self.check({"path": "/tmp/notes.txt", "limit": 10})
+        assert result.decision is Decision.ALLOW
+
+    def test_per_pattern_allow_override(self):
+        result = self.check({"card": VISA}, overrides={"pan": "allow"})
+        assert result.decision is Decision.ALLOW
+
+
+class TestDlpResultInterceptor:
+    def check(self, content, overrides=None):
+        from tollbooth.dlp import DlpResultInterceptor
+        from tollbooth.pipeline import ToolCall
+
+        interceptor = DlpResultInterceptor(overrides=overrides)
+        return interceptor.check_result(
+            ToolCall(server="fs", tool="read_file", args={}), content
+        )
+
+    # R7 scenario: result with secret is redacted, rest of the result intact
+    def test_secret_redacted_in_place(self):
+        edit = self.check(f"export AWS_KEY={AWS_KEY} # deploy creds")
+        assert edit.content == "export AWS_KEY=[REDACTED:aws-access-key] # deploy creds"
+        assert edit.reason_ids == ("aws-access-key",)
+
+    def test_multiple_detections_all_redacted(self):
+        edit = self.check(f"key {AWS_KEY}, ssn 123-45-6789, card {VISA}.")
+        assert edit.content == (
+            "key [REDACTED:aws-access-key], ssn [REDACTED:ssn], card [REDACTED:pan]."
+        )
+        assert edit.reason_ids == ("aws-access-key", "pan", "ssn")
+
+    def test_clean_content_untouched(self):
+        edit = self.check("nothing sensitive here")
+        assert edit.content == "nothing sensitive here"
+        assert edit.reason_ids == ()
+
+    # R7 scenario: per-pattern override — block instead of redact
+    def test_block_override_raises_block_result(self):
+        from tollbooth.pipeline import BlockResult
+
+        with pytest.raises(BlockResult) as exc_info:
+            self.check(
+                "-----BEGIN PRIVATE KEY-----\nhush\n-----END PRIVATE KEY-----",
+                overrides={"private-key-pem": "block"},
+            )
+        assert exc_info.value.reason_id == "private-key-pem"
+
+    def test_allow_override_leaves_content(self):
+        text = "applicant ssn 123-45-6789"
+        edit = self.check(text, overrides={"ssn": "allow"})
+        assert edit.content == text
+        assert edit.reason_ids == ()
 
 
 class TestUnicodeOffsets:

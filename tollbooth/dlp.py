@@ -12,8 +12,11 @@ key=value assignments).
 """
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+
+from tollbooth.pipeline import BlockResult, ResultEdit, ToolCall
+from tollbooth.policy import Decision, PolicyResult
 
 
 @dataclass(frozen=True)
@@ -159,3 +162,91 @@ def scan(text: str, patterns: list[Pattern] | None = None) -> list[Detection]:
         accepted.append(Detection(pattern_id, start, end))
     accepted.sort(key=lambda d: d.start)
     return accepted
+
+
+# -- direction-aware interceptors (R7) ---------------------------------------
+# Defaults: detections in requests (egress) block the call; detections in
+# results are redacted in place. Both overridable per pattern via config.
+
+REQUEST_ACTIONS = ("block", "allow")
+RESULT_ACTIONS = ("redact", "block", "allow")
+
+
+def _iter_strings(value: object) -> Iterator[str]:
+    """Yield every scannable leaf in a tool-call argument tree.
+
+    Non-bool numeric leaves are scanned via str(): a PAN arriving as a JSON
+    number must not slip past a string-only walk.
+    """
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _iter_strings(v)
+    elif isinstance(value, list | tuple):
+        for v in value:
+            yield from _iter_strings(v)
+    elif isinstance(value, int | float) and not isinstance(value, bool):
+        yield str(value)
+
+
+class DlpRequestInterceptor:
+    """Blocks calls whose arguments carry sensitive data (R7 egress default)."""
+
+    name = "dlp-request"
+
+    def __init__(self, overrides: dict[str, str] | None = None):
+        self.overrides = overrides or {}
+
+    def check_request(self, call: ToolCall) -> PolicyResult:
+        found: set[str] = set()
+        for text in _iter_strings(call.args):
+            for det in scan(text):
+                if self.overrides.get(det.pattern_id, "block") == "block":
+                    found.add(det.pattern_id)
+        if found:
+            names = ",".join(sorted(found))
+            return PolicyResult(
+                decision=Decision.DENY,
+                rule_name=f"dlp:{names}",
+                # Names the pattern(s), NEVER the matched values (R6, S1).
+                message=(
+                    f"tollbooth: {call.server}/{call.tool} blocked — sensitive data "
+                    f"detected in arguments ({names}). The flagged values were not "
+                    "forwarded upstream."
+                ),
+            )
+        return PolicyResult(
+            decision=Decision.ALLOW,
+            rule_name=None,
+            message=f"tollbooth: {call.server}/{call.tool} passed DLP.",
+        )
+
+
+class DlpResultInterceptor:
+    """Redacts sensitive data in results (R7 ingress default); blocks on override."""
+
+    name = "dlp-result"
+
+    def __init__(self, overrides: dict[str, str] | None = None):
+        self.overrides = overrides or {}
+
+    def _action(self, pattern_id: str) -> str:
+        return self.overrides.get(pattern_id, "redact")
+
+    def check_result(self, call: ToolCall, content: str) -> ResultEdit:
+        detections = scan(content)
+        blocked = sorted(
+            {d.pattern_id for d in detections if self._action(d.pattern_id) == "block"}
+        )
+        if blocked:
+            # Intentional verdict: survives fail-open (BlockResult contract).
+            raise BlockResult(",".join(blocked))
+        redactions = [d for d in detections if self._action(d.pattern_id) == "redact"]
+        # Right-to-left so earlier spans stay valid as the text shrinks/grows.
+        for det in reversed(redactions):
+            content = f"{content[: det.start]}[REDACTED:{det.pattern_id}]{content[det.end :]}"
+        return ResultEdit(
+            content=content,
+            reason_ids=tuple(sorted({d.pattern_id for d in redactions})),
+        )

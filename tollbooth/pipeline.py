@@ -33,6 +33,20 @@ class ResultVerdict:
     message: str
 
 
+@dataclass(frozen=True)
+class ResultEdit:
+    """A result interceptor's output: content plus what it changed.
+
+    reason_ids is non-empty when the interceptor transformed the content
+    (e.g. DLP redaction pattern ids) — the pipeline turns them into one audit
+    event. Carried in the return value, not interceptor state, so concurrent
+    calls through a shared interceptor can't cross-contaminate (Pattern 8).
+    """
+
+    content: str
+    reason_ids: tuple[str, ...] = ()
+
+
 class BlockResult(Exception):
     """Raised by a result interceptor to INTENTIONALLY withhold a result.
 
@@ -56,8 +70,9 @@ class RequestInterceptor(Protocol):
 class ResultInterceptor(Protocol):
     name: str
 
-    def check_result(self, call: ToolCall, content: str) -> str:
-        """Return (possibly transformed) content, or raise to signal failure."""
+    def check_result(self, call: ToolCall, content: str) -> ResultEdit:
+        """Return the (possibly transformed) content; raise BlockResult to
+        withhold it intentionally, anything else to signal stage failure."""
         ...
 
 
@@ -160,9 +175,12 @@ class Pipeline:
 
     def process_result(self, call: ToolCall, content: str) -> ResultVerdict:
         skipped: list[str] = []
+        transformed: list[str] = []  # reason ids for content edits (e.g. redactions)
         for interceptor in self.result_interceptors:
             try:
-                content = interceptor.check_result(call, content)
+                edit = interceptor.check_result(call, content)
+                content = edit.content
+                transformed.extend(r for r in edit.reason_ids if r not in transformed)
             except BlockResult as block:
                 # Intentional verdict — honored regardless of fail_open.
                 self._audit("result", call, Decision.DENY, block.reason_id)
@@ -190,9 +208,10 @@ class Pipeline:
                         "is fail-closed."
                     ),
                 )
-        # Clean pass-throughs are not audited (log volume); fail-open skips are —
-        # the audit trail must record that a check did not run. M2 note: DLP
-        # redaction (transform + allow) needs its own emission point here.
+        # Clean pass-throughs are not audited (log volume); fail-open skips and
+        # content edits are — an auditor must see skipped checks and redactions.
         if skipped:
             self._audit("result", call, Decision.ALLOW, f"fail-open:{','.join(skipped)}")
+        if transformed:
+            self._audit("result", call, Decision.ALLOW, f"redacted:{','.join(transformed)}")
         return ResultVerdict(decision=Decision.ALLOW, content=content, message="ok")
