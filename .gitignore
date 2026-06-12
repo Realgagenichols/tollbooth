@@ -26,6 +26,10 @@ tasks/
 changes/
 .claude/
 
+# Internal design docs (not published)
+SPEC.md
+docs/design/
+
 # Local gateway runtime artifacts
 /tollbooth.yaml
 tollbooth-audit.jsonl
