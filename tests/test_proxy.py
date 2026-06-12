@@ -244,10 +244,12 @@ async def test_concurrent_calls_get_distinct_call_ids():
     )
     gateway = Gateway(upstreams={"echo": echo}, pipeline=pipeline)
 
-    async with create_connected_server_and_client_session(gateway.server) as client:
-        async with anyio.create_task_group() as tg:
-            for n in range(5):
-                tg.start_soon(client.call_tool, "echo_echo", {"n": n})
+    async with (
+        create_connected_server_and_client_session(gateway.server) as client,
+        anyio.create_task_group() as tg,
+    ):
+        for n in range(5):
+            tg.start_soon(client.call_tool, "echo_echo", {"n": n})
 
     call_ids = [
         json.loads(line)["call_id"] for line in stream.getvalue().splitlines()
