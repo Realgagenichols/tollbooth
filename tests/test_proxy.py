@@ -272,7 +272,7 @@ class TestStructuredContent:
         assert result.structuredContent["note"] == "key [REDACTED:aws-access-key]"
         assert result.structuredContent["ok"] is True
 
-    # R4: redaction that breaks the JSON (bare-number PAN) blocks the result
+    # R4: a numeric leaf can't carry a redaction marker — result is withheld
     async def test_unredactable_structured_content_blocked(self):
         fake = StructuredFake({"card": 4111111111111111})
         gateway = make_dlp_gateway(fake)
@@ -290,3 +290,28 @@ class TestStructuredContent:
             result = await client.call_tool("api_fetch", {})
         assert result.isError is False
         assert result.structuredContent == {"items": [1, 2, 3], "status": "fine"}
+
+    # Section-3 review C1: leaves must be scanned RAW. Scanning the serialized
+    # JSON let escape sequences (\t -> backslash-t) defeat \s-based patterns,
+    # delivering a tab-separated PAN raw while the text block was redacted.
+    @pytest.mark.regression
+    async def test_whitespace_separated_secret_in_leaf_still_redacted(self):
+        pan_with_tabs = "card 4111\t1111\t1111\t1111 ok"
+        fake = StructuredFake({"note": pan_with_tabs, "nested": [{"deep": pan_with_tabs}]})
+        gateway = make_dlp_gateway(fake)
+        async with create_connected_server_and_client_session(gateway.server) as client:
+            result = await client.call_tool("api_fetch", {})
+        assert result.isError is False
+        assert result.structuredContent["note"] == "card [REDACTED:pan] ok"
+        assert result.structuredContent["nested"][0]["deep"] == "card [REDACTED:pan] ok"
+
+    # Section-3 review W1: in-leaf redaction can't break JSON structure, so a
+    # connection string is redacted (usable result), not false-blocked.
+    @pytest.mark.regression
+    async def test_connection_string_in_leaf_redacted_not_blocked(self):
+        fake = StructuredFake({"db": "postgres://user:hunter22@db.example.com/prod"})
+        gateway = make_dlp_gateway(fake)
+        async with create_connected_server_and_client_session(gateway.server) as client:
+            result = await client.call_tool("api_fetch", {})
+        assert result.isError is False
+        assert result.structuredContent["db"] == "[REDACTED:connection-string]"

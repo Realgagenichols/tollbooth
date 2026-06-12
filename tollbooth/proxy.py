@@ -5,7 +5,6 @@ never by string-splitting, since server names may contain underscores (R1).
 Every call runs the request pipeline; every result runs the result pipeline.
 """
 
-import json
 import logging
 from contextlib import AsyncExitStack
 
@@ -22,6 +21,14 @@ log = logging.getLogger(__name__)
 
 class GatewayError(Exception):
     """Gateway-level configuration/runtime failure; message is user-facing."""
+
+
+class _ResultWithheld(Exception):
+    """Internal: a structured-content leaf was blocked; message is user-facing."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
 
 
 def _error_result(message: str) -> types.CallToolResult:
@@ -132,29 +139,55 @@ class Gateway:
                     return _error_result(verdict.message)
                 processed.append(block.model_copy(update={"text": verdict.content}))
             else:
+                # Non-text blocks (images, EmbeddedResource) pass through
+                # unscanned in v1; EmbeddedResource text lands with M3's
+                # resource scanning (SPEC out-of-scope note).
                 processed.append(block)
         structured = result.structuredContent
         if structured is not None:
-            serialized = json.dumps(structured, ensure_ascii=False)
-            verdict = self.pipeline.process_result(call, serialized)
-            if verdict.decision is not Decision.ALLOW or verdict.content is None:
-                return _error_result(verdict.message)
-            if verdict.content != serialized:
-                try:
-                    structured = json.loads(verdict.content)
-                except json.JSONDecodeError:
-                    # Redaction broke the JSON (e.g. a bare-number PAN became a
-                    # marker). A result that can't be redacted is blocked (R4).
-                    log.error(
-                        "structuredContent of %s/%s not valid JSON after redaction",
-                        call.server,
-                        call.tool,
-                    )
-                    return _error_result(
-                        f"tollbooth: result of {call.server}/{call.tool} withheld — "
-                        "sensitive data in structured content could not be redacted."
-                    )
+            try:
+                structured = self._scan_structured(call, structured)
+            except _ResultWithheld as withheld:
+                return _error_result(withheld.message)
         return result.model_copy(update={"content": processed, "structuredContent": structured})
+
+    def _scan_structured(self, call: ToolCall, value: object) -> object:
+        """Run the result pipeline over each leaf of structuredContent (R7).
+
+        Leaves are scanned RAW, never as serialized JSON: an escaping layer
+        between detector and payload (\\t -> backslash-t) defeats patterns
+        written for raw text (section-3 review lesson). Non-bool numeric
+        leaves are scanned via str(); one that would need redaction can't
+        carry a marker, so the whole result is withheld (R4).
+        """
+        if isinstance(value, bool) or value is None:
+            return value
+        if isinstance(value, str):
+            verdict = self.pipeline.process_result(call, value)
+            if verdict.decision is not Decision.ALLOW or verdict.content is None:
+                raise _ResultWithheld(verdict.message)
+            return verdict.content
+        if isinstance(value, int | float):
+            text = str(value)
+            verdict = self.pipeline.process_result(call, text)
+            if verdict.decision is not Decision.ALLOW or verdict.content is None:
+                raise _ResultWithheld(verdict.message)
+            if verdict.content != text:
+                log.error(
+                    "numeric leaf in structuredContent of %s/%s needs redaction",
+                    call.server,
+                    call.tool,
+                )
+                raise _ResultWithheld(
+                    f"tollbooth: result of {call.server}/{call.tool} withheld — "
+                    "sensitive data in structured content could not be redacted."
+                )
+            return value
+        if isinstance(value, dict):
+            return {k: self._scan_structured(call, v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._scan_structured(call, v) for v in value]
+        return value
 
     # -- MCP server ----------------------------------------------------------
 

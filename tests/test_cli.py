@@ -49,6 +49,13 @@ class TestValidate:
         assert code == 0
         out = capsys.readouterr().out
         assert "OK" in out
+        assert "dlp=on" in out  # R6: DLP defaults to enabled
+
+    def test_validate_reports_dlp_off(self, monkeypatch, capsys, tmp_path):
+        path = tmp_path / "tollbooth.yaml"
+        path.write_text(GOOD_CONFIG + "dlp:\n  enabled: false\n", encoding="utf-8")
+        run_cli(monkeypatch, "validate", "-c", str(path))
+        assert "dlp=off" in capsys.readouterr().out
 
     # R3 scenario: invalid config — clear error, exit 2 (config-error contract)
     def test_bad_config_exits_two_with_clear_error(self, monkeypatch, capsys, bad_config):
