@@ -82,13 +82,13 @@ async def test_command_exiting_early_raises_named_error(make_upstream_config):
 # --- N1: streamable HTTP upstream --------------------------------------------
 
 
-async def test_http_fixture_smoke(http_upstream_url):
+async def test_http_fixture_smoke(http_server):
     """The HTTP test server fixture serves a real, initializable MCP endpoint."""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
 
     async with (
-        streamable_http_client(http_upstream_url) as (read, write, _),
+        streamable_http_client(http_server.url) as (read, write, _),
         ClientSession(read, write) as session,
     ):
         await session.initialize()
@@ -102,11 +102,11 @@ def _http_config(url, headers=None):
     return HttpUpstreamConfig.model_validate({"url": url, "headers": headers or {}})
 
 
-async def test_http_pass_through(http_upstream_url):
+async def test_http_pass_through(http_server):
     """N1: list + forward a tool call over streamable HTTP."""
     from tollbooth.upstream import HttpUpstream
 
-    upstream = HttpUpstream("remote", _http_config(http_upstream_url))
+    upstream = HttpUpstream("remote", _http_config(http_server.url))
     try:
         await upstream.start()
         tools = await upstream.list_tools()
@@ -118,14 +118,14 @@ async def test_http_pass_through(http_upstream_url):
         await upstream.aclose()
 
 
-async def test_http_header_env_expansion(http_upstream_url, monkeypatch):
+async def test_http_header_env_expansion(http_server, monkeypatch):
     """N1: ${ENV_VAR} in a header is resolved and reaches the server."""
     from tollbooth.upstream import HttpUpstream
 
     monkeypatch.setenv("REMOTE_TOKEN", "s3cr3t-token-value")
     upstream = HttpUpstream(
         "remote",
-        _http_config(http_upstream_url, {"X-Auth": "Bearer ${REMOTE_TOKEN}"}),
+        _http_config(http_server.url, {"X-Auth": "Bearer ${REMOTE_TOKEN}"}),
     )
     try:
         await upstream.start()
@@ -135,14 +135,14 @@ async def test_http_header_env_expansion(http_upstream_url, monkeypatch):
         await upstream.aclose()
 
 
-async def test_http_missing_env_var_fails_closed_without_echo(http_upstream_url, monkeypatch):
+async def test_http_missing_env_var_fails_closed_without_echo(http_server, monkeypatch):
     """N1: an unset ${VAR} fails closed naming server + var, never the value."""
     from tollbooth.upstream import HttpUpstream
 
     monkeypatch.delenv("REMOTE_TOKEN", raising=False)
     upstream = HttpUpstream(
         "remote",
-        _http_config(http_upstream_url, {"X-Auth": "Bearer ${REMOTE_TOKEN}"}),
+        _http_config(http_server.url, {"X-Auth": "Bearer ${REMOTE_TOKEN}"}),
     )
     try:
         with pytest.raises(UpstreamError) as excinfo:
@@ -172,10 +172,10 @@ async def test_http_error_sanitizes_url_credentials():
         await upstream.aclose()
 
 
-async def test_http_double_start_rejected(http_upstream_url):
+async def test_http_double_start_rejected(http_server):
     from tollbooth.upstream import HttpUpstream
 
-    upstream = HttpUpstream("remote", _http_config(http_upstream_url))
+    upstream = HttpUpstream("remote", _http_config(http_server.url))
     try:
         await upstream.start()
         with pytest.raises(UpstreamError, match="already running"):
@@ -184,10 +184,10 @@ async def test_http_double_start_rejected(http_upstream_url):
         await upstream.aclose()
 
 
-async def test_http_call_after_aclose_raises_not_running(http_upstream_url):
+async def test_http_call_after_aclose_raises_not_running(http_server):
     from tollbooth.upstream import HttpUpstream
 
-    upstream = HttpUpstream("remote", _http_config(http_upstream_url))
+    upstream = HttpUpstream("remote", _http_config(http_server.url))
     await upstream.start()
     await upstream.aclose()
     with pytest.raises(UpstreamError, match="not running"):
@@ -221,12 +221,12 @@ async def test_http_external_cancellation_propagates():
     assert cancelled is True
 
 
-def test_build_upstream_dispatches_on_type(http_upstream_url):
+def test_build_upstream_dispatches_on_type(http_server):
     """N1: the factory picks the transport matching the config type."""
     from tollbooth.config import StdioUpstreamConfig
     from tollbooth.upstream import HttpUpstream, StdioUpstream, build_upstream
 
     stdio = build_upstream("fs", StdioUpstreamConfig(command="x"))
-    http = build_upstream("remote", _http_config(http_upstream_url))
+    http = build_upstream("remote", _http_config(http_server.url))
     assert isinstance(stdio, StdioUpstream)
     assert isinstance(http, HttpUpstream)

@@ -39,40 +39,53 @@ def make_upstream_config():
     return _factory
 
 
-@pytest.fixture
-def http_upstream_url():
-    """Serve the in-repo streamable-HTTP MCP server on an ephemeral port.
+class _HttpTestServer:
+    """A real uvicorn-served streamable-HTTP MCP server on an ephemeral port.
 
-    Yields the base MCP URL. A real uvicorn server in a background thread —
-    no transport mocking, matching the project's real-subprocess bar.
+    No transport mocking — matches the project's real-subprocess bar. `stop()`
+    shuts the server down mid-test so callers can exercise a dead-upstream path.
     """
-    import uvicorn
 
-    from tests.http_echo_server import make_app
+    def __init__(self):
+        import uvicorn
 
-    # Bind an ephemeral port ourselves and hand the socket to uvicorn, so the
-    # URL is known before the server starts (no port race).
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
+        from tests.http_echo_server import make_app
 
-    config = uvicorn.Config(
-        make_app().streamable_http_app(),
-        host="127.0.0.1",
-        port=port,
-        log_level="warning",
-        lifespan="on",  # runs the StreamableHTTP session-manager lifespan
-    )
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 10
-    while not server.started:
-        if time.monotonic() > deadline:  # pragma: no cover
-            raise RuntimeError("http test server did not start within 10s")
-        time.sleep(0.02)
+        # Bind an ephemeral port ourselves and hand the socket to uvicorn, so
+        # the URL is known before the server starts (no port race).
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        self.url = f"http://127.0.0.1:{port}/mcp"
+        self._server = uvicorn.Server(
+            uvicorn.Config(
+                make_app().streamable_http_app(),
+                host="127.0.0.1",
+                port=port,
+                log_level="warning",
+                lifespan="on",  # runs the StreamableHTTP session-manager lifespan
+            )
+        )
+        self._thread = threading.Thread(
+            target=self._server.run, kwargs={"sockets": [sock]}, daemon=True
+        )
+        self._thread.start()
+        deadline = time.monotonic() + 10
+        while not self._server.started:
+            if time.monotonic() > deadline:  # pragma: no cover
+                raise RuntimeError("http test server did not start within 10s")
+            time.sleep(0.02)
+
+    def stop(self):
+        self._server.should_exit = True
+        self._thread.join(timeout=5)
+
+
+@pytest.fixture
+def http_server():
+    """Yield a running `_HttpTestServer` handle (`.url`, `.stop()`)."""
+    server = _HttpTestServer()
     try:
-        yield f"http://127.0.0.1:{port}/mcp"
+        yield server
     finally:
-        server.should_exit = True
-        thread.join(timeout=5)
+        server.stop()

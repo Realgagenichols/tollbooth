@@ -494,3 +494,123 @@ def test_concurrent_hook_processes_keep_chain_valid(tmp_path):
     head = verify_chain(audit_path)
     assert head.events == 8
     assert head.seq == 7
+
+
+# --- N1: streamable HTTP upstream end to end ---------------------------------
+
+
+def _allow_gateway(upstreams):
+    from tollbooth.pipeline import Pipeline, PolicyInterceptor
+    from tollbooth.policy import Decision
+
+    return Gateway(
+        upstreams={u.name: u for u in upstreams},
+        pipeline=Pipeline(
+            request_interceptors=[PolicyInterceptor(rules=[], default=Decision.ALLOW)]
+        ),
+    )
+
+
+def _real_echo_stdio():
+    from tollbooth.config import StdioUpstreamConfig
+    from tollbooth.upstream import StdioUpstream
+
+    return StdioUpstream(
+        "echo", StdioUpstreamConfig(command=sys.executable, args=[str(ECHO_SERVER)])
+    )
+
+
+def _real_http_remote(url):
+    from tollbooth.config import HttpUpstreamConfig
+    from tollbooth.upstream import HttpUpstream
+
+    return HttpUpstream("remote", HttpUpstreamConfig(url=url))
+
+
+async def test_mixed_stdio_and_http_behind_one_gateway(http_server):
+    """N1: one real stdio upstream + one real HTTP upstream behind a single
+    gateway — both catalogs aggregate/namespace and both tools route."""
+    gateway = _allow_gateway([_real_echo_stdio(), _real_http_remote(http_server.url)])
+    try:
+        await gateway.start_upstreams()
+        async with create_connected_server_and_client_session(gateway.server) as client:
+            names = {t.name for t in (await client.list_tools()).tools}
+            assert {"echo_echo", "echo_shout", "echo_leak"} <= names
+            assert {"remote_echo", "remote_leak", "remote_echo_header"} <= names
+
+            stdio_result = await client.call_tool("echo_shout", {"text": "hi"})
+            http_result = await client.call_tool("remote_echo", {"text": "hi"})
+        assert stdio_result.content[0].text == "HI"
+        assert http_result.content[0].text == "echo: hi"
+    finally:
+        await gateway.aclose()
+
+
+async def test_dead_http_upstream_isolated(http_server):
+    """N1: an HTTP upstream that becomes unreachable returns a clean origin-only
+    error while a healthy stdio sibling keeps working (R4 isolation)."""
+    origin = http_server.url.rsplit("/", 1)[0]  # http://127.0.0.1:PORT
+    gateway = _allow_gateway([_real_echo_stdio(), _real_http_remote(http_server.url)])
+    try:
+        await gateway.start_upstreams()
+        async with create_connected_server_and_client_session(gateway.server) as client:
+            # Live: the HTTP call works (also caches the route).
+            assert (await client.call_tool("remote_echo", {"text": "x"})).isError is False
+            # The HTTP server dies mid-session.
+            http_server.stop()
+            dead = await client.call_tool("remote_echo", {"text": "x"})
+            assert dead.isError is True
+            assert "tollbooth" in dead.content[0].text
+            assert origin in dead.content[0].text  # origin echoed, nothing more
+            # The stdio sibling is unaffected.
+            alive = await client.call_tool("echo_shout", {"text": "hi"})
+            assert alive.content[0].text == "HI"
+    finally:
+        await gateway.aclose()
+
+
+async def test_installed_binary_http_upstream_acceptance(http_server, tmp_path):
+    """N1 acceptance: the INSTALLED `tollbooth run` binary proxies a real
+    streamable-HTTP upstream over actual HTTP — allowed call succeeds, a policy
+    rule denies, and a secret in an HTTP result arrives redacted (Pattern 9)."""
+    binary = _installed_binary()
+    audit_path = tmp_path / "audit.jsonl"
+    config_path = tmp_path / "tollbooth.yaml"
+    config_path.write_text(
+        f"""
+servers:
+  remote:
+    url: {http_server.url}
+policy:
+  default: allow
+  rules:
+    - name: no-echo-header
+      action: deny
+      server: remote
+      tool: echo_header
+audit_log: {audit_path}
+""",
+        encoding="utf-8",
+    )
+
+    params = StdioServerParameters(command=binary, args=["run", "-c", str(config_path)])
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        names = {t.name for t in (await session.list_tools()).tools}
+        assert {"remote_echo", "remote_leak", "remote_echo_header"} == names
+
+        allowed = await session.call_tool("remote_echo", {"text": "hi"})
+        assert allowed.isError is False
+        assert allowed.content[0].text == "echo: hi"
+
+        denied = await session.call_tool("remote_echo_header", {"name": "x"})
+        assert denied.isError is True
+        assert "no-echo-header" in denied.content[0].text
+
+        leaked = await session.call_tool("remote_leak", {})
+        assert leaked.isError is False
+        assert "AKIAIOSFODNN7EXAMPLE" not in leaked.content[0].text
+        assert "[REDACTED:aws-access-key]" in leaked.content[0].text
+
+    audit_text = audit_path.read_text(encoding="utf-8")
+    assert "AKIAIOSFODNN7EXAMPLE" not in audit_text

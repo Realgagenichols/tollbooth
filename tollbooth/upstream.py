@@ -6,12 +6,14 @@ streamable HTTP (N1) drops in here without touching the proxy/policy core.
 
 import logging
 import os
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
+from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import urlsplit
 
 import anyio
 import mcp.types as types
+from anyio.streams.memory import MemoryObjectSendStream
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, get_default_environment, stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -169,12 +171,33 @@ class StdioUpstream:
                 log.warning("closing upstream %r raised %s", self.name, type(exc).__name__)
 
 
-class HttpUpstream:
-    """One upstream streamable-HTTP MCP server (N1): client session lifecycle.
+@dataclass
+class _Call:
+    """One RPC handed to the runner task; the reply (ok, payload) comes back on
+    `reply`. ok=False with payload=None means the transport died."""
 
-    Mirrors StdioUpstream — same AsyncExitStack, same init-timeout scoping, same
-    sanitized errors — over the SDK's streamable_http_client instead of a
-    subprocess. start() and aclose() must run in the same task.
+    method: str  # "list_tools" | "call_tool"
+    tool: str | None
+    args: dict[str, object] | None
+    reply: MemoryObjectSendStream
+
+
+class HttpUpstream:
+    """One upstream streamable-HTTP MCP server (N1).
+
+    The transport (httpx client + streamable_http_client + ClientSession) is
+    owned ENTIRELY BY A DEDICATED RUNNER TASK, never the caller's task. The SDK
+    runs HTTP I/O in a background task group; a connection failure cancels that
+    group's scope. Were that scope in the gateway's main task (as a plain
+    AsyncExitStack would put it), a dead upstream would cancel run_stdio and
+    crash the WHOLE gateway. Confining it to the runner — which catches every
+    failure and never lets it escape — isolates a dead upstream (R1/R4): its
+    calls error cleanly while other upstreams keep working.
+
+    list_tools/call_tool forward a `_Call` over a rendezvous channel to the
+    runner and await its reply; the runner serves calls sequentially (one
+    transport, one call at a time). start()/aclose() run in the same task — they
+    enter/exit the task group that owns the runner.
     """
 
     def __init__(self, name: str, config: HttpUpstreamConfig, init_timeout: float | None = None):
@@ -182,7 +205,10 @@ class HttpUpstream:
         self.config = config
         self.init_timeout = init_timeout or DEFAULT_INIT_TIMEOUT
         self._stack: AsyncExitStack | None = None
-        self._session: ClientSession | None = None
+        self._req_send: MemoryObjectSendStream | None = None
+        self._ready = anyio.Event()
+        self._init_error: BaseException | None = None
+        self._closed = False
 
     def _resolve_headers(self) -> dict[str, str]:
         """Expand `${VAR}` references from the environment; fail closed naming
@@ -201,101 +227,163 @@ class HttpUpstream:
     async def start(self) -> None:
         if self._stack is not None:
             raise UpstreamError(f"upstream {self.name!r} is already running")
-        # Resolve headers before opening anything, so a missing env var fails
-        # closed without leaving a transport half-open.
+        # Resolve headers before spawning anything, so a missing env var fails
+        # closed without leaving a runner half-open.
         headers = self._resolve_headers()
+        req_send, req_recv = anyio.create_memory_object_stream[_Call](0)
+        self._req_send = req_send
         self._stack = AsyncExitStack()
         try:
-            # We own the httpx client (configured with headers), so we manage its
-            # lifecycle on the stack; streamable_http_client won't when one is
-            # supplied. The timeout wraps only initialize() — anyio scopes are
-            # strictly nested and must not span a long-lived context's entry.
-            client = create_mcp_http_client(headers=headers or None)
-            await self._stack.enter_async_context(client)
-            read, write, _ = await self._stack.enter_async_context(
-                streamable_http_client(self.config.url, http_client=client)
-            )
-            self._session = await self._stack.enter_async_context(ClientSession(read, write))
-            with anyio.fail_after(self.init_timeout):
-                await self._session.initialize()
+            # The runner is a child of THIS task group (scope in our task). The
+            # runner catches everything, so its failures never cancel us.
+            tg = await self._stack.enter_async_context(anyio.create_task_group())
+            tg.start_soon(self._run, req_recv, headers)
+            # The runner sets _ready on success or failure; initialize() (the
+            # first byte on the wire) is fail_after-wrapped, so a hung connect
+            # can't outlast init_timeout. The +5 is a pure backstop.
+            with anyio.fail_after(self.init_timeout + 5):
+                await self._ready.wait()
         except TimeoutError as exc:
-            await self._teardown()
+            await self._shutdown()
             raise UpstreamError(
                 f"upstream {self.name!r} did not finish initializing within "
                 f"{self.init_timeout:.0f}s ({_url_origin(self.config.url)})"
             ) from exc
-        except BaseException as exc:
-            # A transport-level connection failure closes the read stream, which
-            # CANCELS initialize() — the real cause (e.g. ConnectError) surfaces
-            # only when the transport context is torn down. Teardown to capture
-            # it. Prefer a concrete error; fall back to the teardown cause for a
-            # bare cancellation. If neither is concrete, this was a genuine
-            # external cancel — propagate it untouched.
-            cause = await self._teardown()
-            root = exc if isinstance(exc, Exception) else cause
-            # A cancellation (from `exc` or surfaced by teardown running inside
-            # the cancelled scope) is NOT a concrete failure: honor the cancel.
-            if root is None or isinstance(root, anyio.get_cancelled_exc_class()):
-                raise
+        except BaseException:
+            await self._shutdown()
+            raise
+        if self._init_error is not None:
+            origin = _url_origin(self.config.url)
+            err = self._init_error
+            await self._shutdown()
+            if isinstance(err, TimeoutError):
+                raise UpstreamError(
+                    f"upstream {self.name!r} did not finish initializing within "
+                    f"{self.init_timeout:.0f}s ({origin})"
+                ) from err
             # Origin + exception TYPE only: the raw URL may carry credentials and
             # transport exceptions can echo headers/URLs (Pattern 11).
             raise UpstreamError(
-                f"upstream {self.name!r} failed to start "
-                f"({_url_origin(self.config.url)}): {type(root).__name__}"
-            ) from root
+                f"upstream {self.name!r} failed to start ({origin}): {type(err).__name__}"
+            ) from err
         log.info("upstream %r started (%s)", self.name, _url_origin(self.config.url))
 
-    def _require_session(self) -> ClientSession:
-        if self._session is None:
-            raise UpstreamError(f"upstream {self.name!r} is not running")
-        return self._session
+    async def _run(self, requests, headers: dict[str, str]) -> None:
+        """Owns the transport for the upstream's lifetime; serves calls until the
+        request channel closes. Catches EVERYTHING — a transport failure here
+        must never reach the parent task group in the gateway's main task."""
+        try:
+            async with AsyncExitStack() as stack:
+                # We own the httpx client (configured with headers), so we manage
+                # its lifecycle here; streamable_http_client won't when supplied.
+                client = create_mcp_http_client(headers=headers or None)
+                await stack.enter_async_context(client)
+                read, write, _ = await stack.enter_async_context(
+                    streamable_http_client(self.config.url, http_client=client)
+                )
+                session = await stack.enter_async_context(ClientSession(read, write))
+                # Timeout wraps only initialize() — anyio scopes are strictly
+                # nested and must not span the long-lived context entries.
+                with anyio.fail_after(self.init_timeout):
+                    await session.initialize()
+                self._ready.set()
+                async with requests:
+                    async for call in requests:
+                        await self._serve(session, call)
+        except BaseException as exc:  # noqa: BLE001 - must not escape this task
+            if not self._ready.is_set():
+                # Failed before signalling start(): record the cause for start().
+                self._init_error = _representative_error(exc)
+                self._ready.set()
+            # else: started fine then died — in-flight call already got a reply
+            # (below); future calls fast-fail on the closed channel.
+        finally:
+            self._closed = True
 
-    async def list_tools(self) -> list[types.Tool]:
-        session = self._require_session()
+    async def _serve(self, session: ClientSession, call: _Call) -> None:
+        try:
+            if call.method == "list_tools":
+                payload: object = await self._paginate(session)
+            else:
+                payload = await session.call_tool(call.tool, call.args or {})
+        except anyio.get_cancelled_exc_class():
+            # Transport died (or shutdown): unblock the caller with a transport
+            # sentinel, then re-raise so the runner tears the transport down.
+            await self._reply(call, False, None)
+            raise
+        except Exception as exc:  # a normal per-call failure — keep serving
+            await self._reply(call, False, exc)
+            return
+        await self._reply(call, True, payload)
+
+    async def _paginate(self, session: ClientSession) -> list[types.Tool]:
         tools: list[types.Tool] = []
         cursor: str | None = None
+        while True:
+            result = await session.list_tools(cursor=cursor)
+            tools.extend(result.tools)
+            cursor = result.nextCursor
+            if cursor is None:
+                return tools
+
+    async def _reply(self, call: _Call, ok: bool, payload: object) -> None:
+        # Shield so a caller still gets its reply even while the runner is being
+        # cancelled by a transport death.
+        with anyio.CancelScope(shield=True):
+            with suppress(anyio.BrokenResourceError, anyio.ClosedResourceError):
+                async with call.reply:
+                    await call.reply.send((ok, payload))
+
+    async def _invoke(
+        self, method: str, tool: str | None = None, args: dict[str, object] | None = None
+    ) -> object:
+        if self._req_send is None or self._closed:
+            raise UpstreamError(f"upstream {self.name!r} is not running")
+        reply_send, reply_recv = anyio.create_memory_object_stream[tuple[bool, object]](1)
         try:
-            while True:
-                result = await session.list_tools(cursor=cursor)
-                tools.extend(result.tools)
-                cursor = result.nextCursor
-                if cursor is None:
-                    return tools
-        except Exception as exc:
-            raise self._transport_error("list_tools", exc) from exc
+            await self._req_send.send(_Call(method, tool, args, reply_send))
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+            raise UpstreamError(f"upstream {self.name!r} is not running") from None
+        async with reply_recv:
+            ok, payload = await reply_recv.receive()
+        if ok:
+            return payload
+        if payload is None:  # transport-death sentinel
+            raise UpstreamError(
+                f"upstream {self.name!r} {method} failed "
+                f"({_url_origin(self.config.url)}: transport closed)"
+            )
+        raise self._transport_error(method, payload) from payload  # type: ignore[arg-type]
+
+    async def list_tools(self) -> list[types.Tool]:
+        return await self._invoke("list_tools")  # type: ignore[return-value]
 
     async def call_tool(self, tool: str, args: dict[str, object]) -> types.CallToolResult:
-        session = self._require_session()
-        try:
-            return await session.call_tool(tool, args)
-        except Exception as exc:
-            raise self._transport_error("call_tool", exc) from exc
+        return await self._invoke("call_tool", tool, args)  # type: ignore[return-value]
 
-    def _transport_error(self, op: str, exc: Exception) -> UpstreamError:
+    def _transport_error(self, op: str, exc: BaseException) -> UpstreamError:
         # Origin + exception TYPE only — never the raw URL or headers.
         return UpstreamError(
             f"upstream {self.name!r} {op} failed "
             f"({_url_origin(self.config.url)}: {type(exc).__name__})"
         )
 
-    async def _teardown(self) -> BaseException | None:
-        """Close the transport stack; return the representative error it raised
-        (digging through ExceptionGroups), or None on a clean close."""
-        self._session = None
-        if self._stack is None:
-            return None
-        stack, self._stack = self._stack, None
-        try:
-            await stack.aclose()
-            return None
-        except BaseException as exc:  # noqa: BLE001 - cleanup must never propagate
-            return _representative_error(exc)
+    async def _shutdown(self) -> None:
+        """Stop the runner and close the transport; never propagates."""
+        self._closed = True
+        if self._req_send is not None:
+            with suppress(anyio.ClosedResourceError, anyio.BrokenResourceError):
+                await self._req_send.aclose()  # ends the runner's `async for`
+            self._req_send = None
+        if self._stack is not None:
+            stack, self._stack = self._stack, None
+            try:
+                await stack.aclose()  # exits the task group; awaits the runner
+            except Exception as exc:  # noqa: BLE001 - cleanup must never propagate
+                log.warning("closing upstream %r raised %s", self.name, type(exc).__name__)
 
     async def aclose(self) -> None:
-        cause = await self._teardown()
-        if cause is not None:
-            # Closing a dead upstream must never take the gateway down.
-            log.warning("closing upstream %r raised %s", self.name, type(cause).__name__)
+        await self._shutdown()
 
 
 def build_upstream(name: str, config: UpstreamConfig) -> UpstreamTransport:
