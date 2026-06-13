@@ -133,6 +133,95 @@ tollbooth audit query --log audit.jsonl --decision deny --since 2026-06-12T00:00
 tollbooth audit replay <session-id> --log audit.jsonl
 ```
 
+## Plugins
+
+Beyond the built-in policy and DLP stages you can load your own interceptors,
+declared in config as `module:factory` import specs. Plugins run **after** the
+built-ins, in declared order — they can tighten a verdict but never loosen one
+(the first non-`allow` decision short-circuits), and they run under the same
+fail-closed semantics: a plugin that raises at runtime denies the call (or
+withholds the result).
+
+```yaml
+plugins:
+  - plugin: examples.plugins.prompt_injection:create   # importable module:factory
+    settings:
+      action: annotate    # plugin-specific settings dict, passed to the factory
+```
+
+The module must be importable by the tollbooth process. The installed
+`tollbooth` console script does **not** add the current directory to
+`sys.path`, so a plugin living in your working tree needs
+`PYTHONPATH=/path/to/it` (or, better, pip-install it as a package). Loading is
+fail-fast: an import error, a factory that raises, a name collision with a
+built-in, or an interceptor implementing neither hook aborts startup naming the
+plugin (and reporting the exception **type** only — settings values are never
+echoed). Auto-discovery is deliberately *not* supported: the config file is the
+security boundary, so installing a package must never silently insert an
+interceptor.
+
+Write one against the public API (`from tollbooth import ...`):
+
+```python
+from tollbooth import ToolCall, PolicyResult, Decision, ResultEdit, BlockResult
+
+class TagInternalHosts:
+    name = "tag-internal-hosts"          # unique; used in audit reason_ids
+
+    def check_request(self, call: ToolCall) -> PolicyResult:
+        # Return DENY/REQUIRE_APPROVAL to short-circuit, or ALLOW to pass.
+        # rule_name names the verdict in the audit log (None for an allow).
+        if "10.0." in str(call.args.get("url", "")):
+            return PolicyResult(decision=Decision.DENY, rule_name=self.name,
+                                message="internal host blocked")
+        return PolicyResult(decision=Decision.ALLOW, rule_name=None, message="ok")
+
+    def check_result(self, call: ToolCall, content: str) -> ResultEdit:
+        # Transform content + report reason_ids for audit, or
+        # `raise BlockResult(reason_id)` to withhold the result entirely.
+        return ResultEdit(content=content)
+
+def create(settings: dict) -> "TagInternalHosts":
+    return TagInternalHosts()
+```
+
+An interceptor may implement `check_request`, `check_result`, or both. Exported
+types: `ToolCall`, `PolicyResult`, `ResultEdit`, `BlockResult`, `Decision`,
+`RequestInterceptor`, `ResultInterceptor`. The shipped
+`examples/plugins/prompt_injection.py` is a reference result-path detector
+(instruction-override heuristics; `action: block | annotate`) — explicitly not
+production-grade, it exists to show a detector slotting into this interface.
+
+## Claude Code hooks
+
+The same policy + DLP engine runs as Claude Code
+[PreToolUse/PostToolUse hooks](https://docs.claude.com/en/docs/claude-code/hooks),
+governing the client's *own* tools (Bash, Edit, ...) — not just proxied MCP
+servers. `tollbooth hook pre|post` reads the hook event JSON on stdin and
+answers on stdout:
+
+- **pre** — `deny` → `permissionDecision: "deny"` naming the rule;
+  `require-approval` → `"ask"` with the approvable message; `allow` → **no
+  output**, deferring to Claude Code's own permission prompt (tollbooth never
+  auto-approves).
+- **post** — DLP redactions come back via `updatedToolOutput`; a per-pattern
+  `block` override replaces the output with a withholding message.
+
+Native tools route as server `claude` (e.g. a rule for server `claude`, tool
+`Bash`); MCP tools arrive as `mcp__{server}__{tool}` and route as
+`(server, tool)`. Any internal error — malformed stdin, broken config, a
+pipeline crash — fails closed (deny on pre, withheld output on post) and never
+echoes input values. Audit events append to the configured log under Claude's
+`session_id`, with cross-process locking so concurrent hook invocations keep
+the hash chain intact.
+
+Emit the settings block (absolute, shell-quoted binary + config paths) and
+merge it into `.claude/settings.json`:
+
+```bash
+tollbooth emit-config --claude-hooks -c tollbooth.yaml
+```
+
 ## Development
 
 ```bash

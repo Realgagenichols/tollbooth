@@ -88,6 +88,24 @@ dlp:
     #   requests: allow
     #   results: allow
 
+# Plugins (M4): extra interceptors declared as `module:factory` import specs.
+# They run AFTER the built-in policy and DLP stages, in the order listed, and
+# can only tighten a verdict (a non-allow short-circuits) — never loosen one.
+# Loading is fail-fast: a bad import, a factory that raises, or a name that
+# collides with a built-in aborts startup. Auto-discovery is intentionally not
+# supported — installing a package must not silently insert an interceptor.
+#
+# Uncomment to load the shipped reference prompt-injection detector. The module
+# must be importable by the tollbooth process — and the installed `tollbooth`
+# console script does NOT put the current directory on sys.path. Run with
+# PYTHONPATH pointing at the repo root for this example
+# (`PYTHONPATH=/path/to/tollbooth tollbooth run ...`), or pip-install your own
+# plugin package so it imports without PYTHONPATH.
+# plugins:
+#   - plugin: examples.plugins.prompt_injection:create
+#     settings:
+#       action: annotate    # or: block
+
 # Tamper-evident JSONL trail (M3): every event hash-chains to the previous
 # one — `tollbooth audit verify` detects edits/deletions/reordering, and
 # TOLLBOOTH_AUDIT_KEY (env) upgrades the chain to HMAC. `record: full`
