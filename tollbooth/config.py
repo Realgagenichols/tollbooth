@@ -304,8 +304,9 @@ def import_client_config(path: str | Path) -> tuple[GatewayConfig, list[str]]:
     """Build a starter gateway config from an MCP client config (S2).
 
     Accepts the `mcpServers` (Claude Desktop / .mcp.json) or `servers`
-    (VS Code mcp.json) layout. Returns the validated config plus the names
-    of skipped non-stdio entries (no `command`, e.g. HTTP servers — N1).
+    (VS Code mcp.json) layout. `command` entries import as stdio upstreams and
+    `url` entries as HTTP upstreams (N1, carrying any `headers`). Returns the
+    validated config plus the names of skipped entries (neither command nor url).
     """
     path = Path(path)
     try:
@@ -329,16 +330,25 @@ def import_client_config(path: str | Path) -> tuple[GatewayConfig, list[str]]:
     servers: dict[str, dict] = {}
     skipped: list[str] = []
     for name, entry in entries.items():
-        if not isinstance(entry, dict) or "command" not in entry:
+        if not isinstance(entry, dict):
             skipped.append(name)
-            continue
-        servers[name] = {
-            "command": entry["command"],
-            "args": entry.get("args", []),
-            "env": entry.get("env", {}),
-        }
+        elif "command" in entry:
+            servers[name] = {
+                "command": entry["command"],
+                "args": entry.get("args", []),
+                "env": entry.get("env", {}),
+            }
+        elif "url" in entry:
+            servers[name] = {
+                "url": entry["url"],
+                "headers": entry.get("headers", {}),
+            }
+        else:
+            skipped.append(name)
     if not servers:
-        raise ConfigError(f"no stdio servers in {path}: all entries lack a 'command'")
+        raise ConfigError(
+            f"no MCP servers in {path}: all entries lack a 'command' or 'url'"
+        )
 
     config = _validate_gateway_config(
         {
@@ -361,11 +371,17 @@ def render_starter_yaml(config: GatewayConfig) -> str:
     """
     servers = {}
     for name, spec in config.servers.items():
-        entry: dict[str, object] = {"command": spec.command}
-        if spec.args:
-            entry["args"] = spec.args
-        if spec.env:
-            entry["env"] = spec.env
+        entry: dict[str, object] = {}
+        if isinstance(spec, StdioUpstreamConfig):
+            entry["command"] = spec.command
+            if spec.args:
+                entry["args"] = spec.args
+            if spec.env:
+                entry["env"] = spec.env
+        else:  # HttpUpstreamConfig
+            entry["url"] = spec.url
+            if spec.headers:
+                entry["headers"] = spec.headers
         servers[name] = entry
     data = {
         "servers": servers,

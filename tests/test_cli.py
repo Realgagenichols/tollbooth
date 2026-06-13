@@ -303,13 +303,43 @@ class TestImport:
         assert run_cli(monkeypatch, "import", str(client), "-o", str(out)) == 0
         assert set(load_config(out).servers) == {"fs"}
 
-    def test_non_stdio_entries_skipped_with_notice(self, monkeypatch, capsys, tmp_path):
+    # S2/N1 scenario: a `url` entry imports as an HTTP upstream (with headers),
+    # alongside a stdio entry — nothing skipped.
+    def test_import_http_server_with_headers(self, monkeypatch, capsys, tmp_path):
+        from tollbooth.config import HttpUpstreamConfig, StdioUpstreamConfig, load_config
+
         client = self.write_client_config(
             tmp_path,
             {
                 "mcpServers": {
                     "fs": {"command": "fs-server"},
-                    "remote": {"url": "https://example.com/mcp"},
+                    "remote": {
+                        "url": "https://example.com/mcp",
+                        "headers": {"Authorization": "Bearer ${REMOTE_TOKEN}"},
+                    },
+                }
+            },
+        )
+        out = tmp_path / "out.yaml"
+        assert run_cli(monkeypatch, "import", str(client), "-o", str(out)) == 0
+        captured = capsys.readouterr()
+        assert "2 upstream server(s)" in captured.out
+        assert "skipped" not in captured.err
+
+        config = load_config(out)  # generated file round-trips through validate
+        assert isinstance(config.servers["fs"], StdioUpstreamConfig)
+        remote = config.servers["remote"]
+        assert isinstance(remote, HttpUpstreamConfig)
+        assert remote.url == "https://example.com/mcp"
+        assert remote.headers == {"Authorization": "Bearer ${REMOTE_TOKEN}"}
+
+    def test_entry_with_neither_command_nor_url_skipped(self, monkeypatch, capsys, tmp_path):
+        client = self.write_client_config(
+            tmp_path,
+            {
+                "mcpServers": {
+                    "fs": {"command": "fs-server"},
+                    "weird": {"note": "no command or url here"},
                 }
             },
         )
@@ -317,7 +347,7 @@ class TestImport:
         assert run_cli(monkeypatch, "import", str(client), "-o", str(out)) == 0
         captured = capsys.readouterr()
         assert "1 upstream server(s)" in captured.out
-        assert "skipped 'remote'" in captured.err
+        assert "skipped 'weird'" in captured.err
 
     # S2/R3: malformed input — clear error, no raw exception interpolation
     def test_malformed_json_clear_error(self, monkeypatch, capsys, tmp_path):

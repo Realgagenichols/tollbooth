@@ -261,7 +261,7 @@ def cmd_import(client_config_path: str, output: str) -> int:
         raise ConfigError(f"cannot write {out_path}: {exc}") from exc
     print(f"wrote {out_path}: {len(config.servers)} upstream server(s), dlp=on")
     for name in skipped:
-        print(f"skipped {name!r}: no command (non-stdio servers land in N1)", file=sys.stderr)
+        print(f"skipped {name!r}: entry has neither 'command' nor 'url'", file=sys.stderr)
     return 0
 
 
