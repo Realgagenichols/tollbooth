@@ -31,6 +31,7 @@ from tollbooth.config import (
     load_config,
     render_starter_yaml,
 )
+from tollbooth.hook import emit_hooks_config, run_hook
 from tollbooth.pipeline import Pipeline
 from tollbooth.plugins import build_interceptors, load_plugins
 from tollbooth.proxy import Gateway
@@ -58,6 +59,23 @@ def build_parser() -> argparse.ArgumentParser:
         "emit-config", help="Emit the MCP client config pointing at the gateway"
     )
     emit_parser.add_argument("-c", "--config", required=True, help="Path to tollbooth.yaml")
+    emit_parser.add_argument(
+        "--claude-hooks",
+        action="store_true",
+        help="Emit the Claude Code settings.json hooks block instead (R15)",
+    )
+
+    hook_parser = subparsers.add_parser(
+        "hook", help="Claude Code hook adapter: evaluate one PreToolUse/PostToolUse event"
+    )
+    hook_sub = hook_parser.add_subparsers(dest="hook_command", required=True)
+    for kind, event_name in (("pre", "PreToolUse"), ("post", "PostToolUse")):
+        kind_parser = hook_sub.add_parser(
+            kind, help=f"Handle a {event_name} event (JSON on stdin)"
+        )
+        kind_parser.add_argument(
+            "-c", "--config", required=True, help="Path to tollbooth.yaml"
+        )
 
     import_parser = subparsers.add_parser(
         "import", help="Bootstrap tollbooth.yaml from an existing MCP client config"
@@ -220,8 +238,9 @@ def cmd_validate(config_path: str) -> int:
     return 0
 
 
-def cmd_emit_config(config_path: str) -> int:
-    print(json.dumps(emit_client_config(config_path), indent=2))
+def cmd_emit_config(config_path: str, claude_hooks: bool = False) -> int:
+    emitted = emit_hooks_config(config_path) if claude_hooks else emit_client_config(config_path)
+    print(json.dumps(emitted, indent=2))
     return 0
 
 
@@ -312,6 +331,12 @@ def main() -> None:
     try:
         if args.command == "import":
             code = cmd_import(args.client_config, args.output)
+        elif args.command == "hook":
+            # run_hook handles its own failures: any error becomes a blocking
+            # JSON verdict on stdout (fail-closed), never a bare exit code.
+            code = run_hook(args.hook_command, args.config, sys.stdin, sys.stdout)
+        elif args.command == "emit-config":
+            code = cmd_emit_config(args.config, claude_hooks=args.claude_hooks)
         elif args.command == "audit":
             audit_commands = {
                 "verify": lambda a: cmd_audit_verify(a.log),
@@ -320,7 +345,7 @@ def main() -> None:
             }
             code = audit_commands[args.audit_command](args)
         else:
-            commands = {"run": cmd_run, "validate": cmd_validate, "emit-config": cmd_emit_config}
+            commands = {"run": cmd_run, "validate": cmd_validate}
             code = commands[args.command](args.config)
     except (ConfigError, AuditError) as exc:
         print(f"tollbooth: {exc}", file=sys.stderr)

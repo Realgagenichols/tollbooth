@@ -464,3 +464,61 @@ class TestAuditQueryReplay:
         code = run_cli(monkeypatch, "audit", "replay", "nope", "--log", str(log))
         assert code == 1
         assert "no events" in capsys.readouterr().err
+
+
+class TestHookCli:
+    """R15: hook subcommand and emitted hooks settings."""
+
+    PAYLOAD = '{"session_id": "s", "tool_name": "fs_read", "tool_input": {}}'
+
+    def test_hook_pre_runs_from_argv(self, monkeypatch, capsys, good_config):
+        import io
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(self.PAYLOAD))
+        code = run_cli(monkeypatch, "hook", "pre", "-c", str(good_config))
+        assert code == 0
+        # default deny in GOOD_CONFIG + unmatched native tool → deny JSON
+        out = json.loads(capsys.readouterr().out)
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_hook_post_runs_from_argv(self, monkeypatch, capsys, good_config):
+        import io
+
+        payload = self.PAYLOAD[:-1] + ', "tool_response": "clean text"}'
+        monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+        code = run_cli(monkeypatch, "hook", "post", "-c", str(good_config))
+        assert code == 0
+        assert capsys.readouterr().out == ""  # clean result: no output
+
+    # R15 scenario: emit hooks settings
+    def test_emit_claude_hooks_settings(self, monkeypatch, capsys, good_config):
+        code = run_cli(monkeypatch, "emit-config", "--claude-hooks", "-c", str(good_config))
+        assert code == 0
+        emitted = json.loads(capsys.readouterr().out)
+        hooks = emitted["hooks"]
+        assert set(hooks) == {"PreToolUse", "PostToolUse"}
+        [pre_entry] = hooks["PreToolUse"]
+        [hook] = pre_entry["hooks"]
+        assert hook["type"] == "command"
+        # absolute paths: binary and config (emitted configs must work in
+        # the consumer's environment — lessons.md)
+        command = hook["command"]
+        assert " hook pre -c " in command
+        assert str(good_config.resolve()) in command
+        [post_entry] = hooks["PostToolUse"]
+        assert " hook post -c " in post_entry["hooks"][0]["command"]
+
+    def test_emit_claude_hooks_validates_config_first(self, monkeypatch, capsys, bad_config):
+        code = run_cli(monkeypatch, "emit-config", "--claude-hooks", "-c", str(bad_config))
+        assert code == 2
+        assert capsys.readouterr().out == ""
+
+    def test_paths_with_spaces_are_shell_quoted(self, monkeypatch, capsys, tmp_path):
+        spaced = tmp_path / "my configs"
+        spaced.mkdir()
+        config = spaced / "tollbooth.yaml"
+        config.write_text(GOOD_CONFIG, encoding="utf-8")
+        run_cli(monkeypatch, "emit-config", "--claude-hooks", "-c", str(config))
+        emitted = json.loads(capsys.readouterr().out)
+        command = emitted["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        assert "'" in command  # shlex-quoted path survives the shell

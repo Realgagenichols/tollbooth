@@ -15,6 +15,7 @@ so validation errors never echo values (Patterns 11, 13).
 
 import json
 import logging
+import shlex
 import sys
 import uuid
 from pathlib import Path
@@ -23,7 +24,7 @@ from typing import Any, TextIO
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from tollbooth.audit import AuditLogger, audit_key_from_env
-from tollbooth.config import VIRTUAL_SERVER, GatewayConfig, load_config
+from tollbooth.config import VIRTUAL_SERVER, GatewayConfig, _gateway_command, load_config
 from tollbooth.pipeline import Pipeline, ToolCall
 from tollbooth.plugins import build_interceptors
 from tollbooth.policy import Decision
@@ -192,6 +193,29 @@ def _build_pipeline(config: GatewayConfig, event: PreToolUseEvent, stack) -> Pip
         fail_open=(config.policy.failure_mode == "open"),
         audit=audit,
     )
+
+
+def emit_hooks_config(config_path: str | Path) -> dict:
+    """The `.claude/settings.json` hooks block wiring Claude Code to the
+    adapter. Validates the gateway config first — never emit a pointer to a
+    broken setup. Paths are absolute and shell-quoted: hook commands run via
+    the shell in the client's environment, not ours (lessons.md)."""
+    config_path = Path(config_path)
+    load_config(config_path)
+    command = shlex.quote(_gateway_command())
+    target = shlex.quote(str(config_path.resolve()))
+
+    def entry(kind: str) -> list[dict]:
+        return [
+            {
+                "matcher": "*",
+                "hooks": [
+                    {"type": "command", "command": f"{command} hook {kind} -c {target}"}
+                ],
+            }
+        ]
+
+    return {"hooks": {"PreToolUse": entry("pre"), "PostToolUse": entry("post")}}
 
 
 def run_hook(kind: str, config_path: str, stdin: TextIO, stdout: TextIO) -> int:
