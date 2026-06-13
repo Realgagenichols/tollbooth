@@ -1,0 +1,40 @@
+# tollbooth hooks demo config — for exercising the Claude Code hook adapter.
+#
+# No upstream servers: the hook adapter governs Claude Code's OWN tools (Bash,
+# Edit, ...), so `servers` is empty. Two things to observe live:
+#   1. a denied Bash command  -> PreToolUse returns permissionDecision: deny
+#   2. a secret in tool output -> PostToolUse redacts it via updatedToolOutput
+#
+# Wire it with:  tollbooth emit-config --claude-hooks -c examples/hooks-demo.yaml
+
+servers: {}
+
+policy:
+  default: allow          # only the rules below block; everything else proceeds
+  failure_mode: closed    # any adapter error => deny (pre) / withhold (post)
+  rules:
+    # A safe, deterministic deny trigger: ask Claude to run a command whose
+    # text contains this sentinel and the PreToolUse hook denies it by name.
+    - name: demo-sentinel-block
+      action: deny
+      server: claude       # native Claude Code tools route under "claude"
+      tool: Bash
+      where:
+        command:
+          regex: "BLOCKED_BY_TOLLBOOTH"
+
+    # A realistic denylist entry: curl piped straight into a shell.
+    - name: no-curl-pipe-sh
+      action: deny
+      server: claude
+      tool: Bash
+      where:
+        command:
+          regex: "curl.*\\|\\s*sh"
+
+dlp:
+  enabled: true           # redacts secrets in tool RESULTS (PostToolUse)
+
+audit:
+  log: ./tollbooth-hooks-demo-audit.jsonl
+  record: metadata        # decision-only; never records the secret value
