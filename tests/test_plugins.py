@@ -243,6 +243,7 @@ class TestPluginsInPipeline:
         assert SENTINEL not in caplog.text
         assert SENTINEL not in stream.getvalue()
         assert "crashy" in caplog.text
+        assert "RuntimeError" in caplog.text  # the type IS logged, just never the message
 
     # pipeline.py reviewer note (M4): multiple naming allows aggregate in
     # chain order instead of last-writer-wins
