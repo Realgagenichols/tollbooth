@@ -153,7 +153,7 @@ class Pipeline:
         return self.fail_open
 
     def evaluate_request(self, call: ToolCall) -> PolicyResult:
-        allow_reason: str | None = None  # rule that allowed, if any (for audit)
+        allow_reasons: list[str] = []  # naming allows, in chain order (for audit)
         skipped: list[str] = []  # stages skipped by fail-open — must reach the audit trail
         for interceptor in self.request_interceptors:
             try:
@@ -177,18 +177,19 @@ class Pipeline:
                 self._audit("request", call, result.decision, result.rule_name)
                 return result
             if result.rule_name is not None:
-                # Last-writer-wins is fine while policy is the only naming
-                # interceptor; revisit when M4 adds more (audit reviewer note).
-                allow_reason = result.rule_name
-        # A degraded (fail-open) allow outranks the rule name in the audit
+                allow_reasons.append(result.rule_name)
+        # Interceptor names are collision-checked at load, so the joined
+        # reasons stay attributable to one stage each (R13).
+        allowed_by = ",".join(allow_reasons) or None
+        # A degraded (fail-open) allow outranks the rule names in the audit
         # trail: an auditor must be able to see that checks were skipped.
-        reason = f"fail-open:{','.join(skipped)}" if skipped else allow_reason
+        reason = f"fail-open:{','.join(skipped)}" if skipped else allowed_by
         # Post-enforcement payload (R10): these args are what the upstream
         # will receive; the logger drops them unless record="full".
         self._audit("request", call, Decision.ALLOW, reason, args=call.args)
         return PolicyResult(
             decision=Decision.ALLOW,
-            rule_name=allow_reason,
+            rule_name=allowed_by,
             message=f"tollbooth: {call.server}/{call.tool} allowed.",
         )
 

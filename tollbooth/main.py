@@ -33,6 +33,7 @@ from tollbooth.config import (
 )
 from tollbooth.dlp import DlpRequestInterceptor, DlpResultInterceptor
 from tollbooth.pipeline import Pipeline, PolicyInterceptor
+from tollbooth.plugins import load_plugins
 from tollbooth.proxy import Gateway
 from tollbooth.upstream import StdioUpstream, UpstreamError
 
@@ -137,6 +138,11 @@ def build_gateway(
         # Policy first (cheap, names rules), then DLP scans what policy allowed.
         request_interceptors.append(DlpRequestInterceptor(config.dlp.request_overrides()))
         result_interceptors.append(DlpResultInterceptor(config.dlp.result_overrides()))
+    # Plugins last (R13): they tighten after built-ins, never pre-empt them.
+    # A broken plugin raises ConfigError here — before any upstream starts.
+    plugin_set = load_plugins(config.plugins)
+    request_interceptors.extend(plugin_set.request)
+    result_interceptors.extend(plugin_set.result)
     pipeline = Pipeline(
         request_interceptors=request_interceptors,
         result_interceptors=result_interceptors,
@@ -207,13 +213,15 @@ def cmd_run(config_path: str) -> int:
 
 def cmd_validate(config_path: str) -> int:
     config = load_config(config_path)
+    # Validation covers plugins too: a config that imports is one that runs.
+    load_plugins(config.plugins)
     dlp_state = (
         f"on ({len(config.dlp.overrides)} override(s))" if config.dlp.enabled else "off"
     )
     print(
         f"OK: {len(config.servers)} server(s), {len(config.policy.rules)} rule(s), "
         f"default={config.policy.default}, failure_mode={config.policy.failure_mode}, "
-        f"dlp={dlp_state}"
+        f"dlp={dlp_state}, plugins={len(config.plugins)}"
     )
     return 0
 
