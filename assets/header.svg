@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 300" width="920" height="300" font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-label="tollbooth — a firewall, DLP, and audit layer for AI agent tool traffic">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B0E14"/>
+      <stop offset="1" stop-color="#10141D"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#58A6FF"/>
+      <stop offset="0.55" stop-color="#56D4DD"/>
+      <stop offset="1" stop-color="#3FB950"/>
+    </linearGradient>
+    <linearGradient id="wire" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#30363D"/>
+      <stop offset="0.5" stop-color="#3B434D"/>
+      <stop offset="1" stop-color="#30363D"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- panel -->
+  <rect x="1" y="1" width="918" height="298" rx="18" fill="url(#bg)" stroke="#1C222C" stroke-width="2"/>
+
+  <!-- wordmark + tagline -->
+  <text x="46" y="62" font-size="42" font-weight="700" letter-spacing="-1" fill="url(#mark)">tollbooth</text>
+  <text x="48" y="90" font-size="15" fill="#8B949E">a firewall + DLP + audit layer for AI&#160;agent tool traffic</text>
+
+  <!-- ============ data-flow diagram ============ -->
+  <!-- wires (drawn first, behind nodes) -->
+  <line x1="196" y1="196" x2="404" y2="196" stroke="url(#wire)" stroke-width="3"/>
+  <line x1="516" y1="196" x2="724" y2="196" stroke="url(#wire)" stroke-width="3"/>
+
+  <!-- AI AGENT node -->
+  <rect x="46" y="164" width="150" height="64" rx="11" fill="#0E1420" stroke="#243042" stroke-width="1.5"/>
+  <text x="121" y="194" font-size="15" font-weight="600" fill="#E6EDF3" text-anchor="middle">AI AGENT</text>
+  <text x="121" y="213" font-size="11" fill="#6E7B8B" text-anchor="middle">Claude Code · Cursor</text>
+
+  <!-- MCP SERVERS node -->
+  <rect x="724" y="164" width="150" height="64" rx="11" fill="#0E1420" stroke="#243042" stroke-width="1.5"/>
+  <text x="799" y="194" font-size="15" font-weight="600" fill="#E6EDF3" text-anchor="middle">MCP SERVERS</text>
+  <text x="799" y="213" font-size="11" fill="#6E7B8B" text-anchor="middle">fs · shell · github</text>
+
+  <!-- ===== the gate ===== -->
+  <!-- pillars -->
+  <rect x="392" y="138" width="20" height="116" rx="4" fill="#161C27" stroke="#2B3645" stroke-width="1.5"/>
+  <rect x="508" y="138" width="20" height="116" rx="4" fill="#161C27" stroke="#2B3645" stroke-width="1.5"/>
+  <!-- arch / header bar -->
+  <rect x="386" y="120" width="148" height="26" rx="6" fill="#11161F" stroke="#2B3645" stroke-width="1.5"/>
+  <text x="460" y="138" font-size="13" font-weight="700" letter-spacing="3" fill="#58A6FF" text-anchor="middle">GATEWAY</text>
+  <!-- stage labels inside the gate -->
+  <text x="460" y="180" font-size="12.5" font-weight="600" fill="#C9D4E2" text-anchor="middle">policy</text>
+  <text x="460" y="200" font-size="12.5" font-weight="600" fill="#C9D4E2" text-anchor="middle">DLP</text>
+  <text x="460" y="220" font-size="12.5" font-weight="600" fill="#C9D4E2" text-anchor="middle">audit</text>
+  <!-- scanning pulse between pillars -->
+  <line x1="414" y1="146" x2="414" y2="246" stroke="#56D4DD" stroke-width="2" opacity="0">
+    <animate attributeName="x1" values="414;506;414" dur="3.2s" repeatCount="indefinite"/>
+    <animate attributeName="x2" values="414;506;414" dur="3.2s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;0.5;0" dur="3.2s" repeatCount="indefinite"/>
+  </line>
+
+  <!-- ===== packets ===== -->
+  <!-- allowed packet A (green, passes all the way through) -->
+  <circle r="6" cy="196" fill="#3FB950" filter="url(#glow)">
+    <animate attributeName="cx" values="196;724" dur="4.6s" begin="0s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;1;1;1;0" keyTimes="0;0.05;0.5;0.95;1" dur="4.6s" begin="0s" repeatCount="indefinite"/>
+  </circle>
+  <!-- allowed packet B (green, staggered) -->
+  <circle r="6" cy="196" fill="#3FB950" filter="url(#glow)">
+    <animate attributeName="cx" values="196;724" dur="4.6s" begin="2.3s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;1;1;1;0" keyTimes="0;0.05;0.5;0.95;1" dur="4.6s" begin="2.3s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- blocked packet (red, halts at the gate) -->
+  <circle r="7" cy="196" fill="#F85149" filter="url(#glow)">
+    <animate attributeName="cx" values="196;392;392;392" keyTimes="0;0.42;0.86;1" dur="4.6s" begin="1.15s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;1;1;1;0;0" keyTimes="0;0.08;0.42;0.82;0.9;1" dur="4.6s" begin="1.15s" repeatCount="indefinite"/>
+  </circle>
+  <!-- block marker that flashes when the red packet arrives -->
+  <text x="392" y="201" font-size="16" font-weight="700" fill="#F85149" text-anchor="middle" opacity="0">✕
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.42;0.46;0.82;0.86;1" dur="4.6s" begin="1.15s" repeatCount="indefinite"/>
+  </text>
+
+  <!-- footer chips -->
+  <g font-size="11.5" font-weight="600" fill="#8B949E">
+    <text x="46" y="270">fail-closed by default</text>
+    <text x="232" y="270" fill="#2B3645">•</text>
+    <text x="250" y="270">secrets never logged</text>
+    <text x="420" y="270" fill="#2B3645">•</text>
+    <text x="438" y="270">tamper-evident audit</text>
+    <text x="612" y="270" fill="#2B3645">•</text>
+    <text x="630" y="270">client-agnostic MCP proxy</text>
+  </g>
+</svg>
