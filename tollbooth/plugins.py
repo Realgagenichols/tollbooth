@@ -10,8 +10,9 @@ arbitrary exception text may echo settings values (Pattern 11).
 from dataclasses import dataclass
 from importlib import import_module
 
-from tollbooth.config import ConfigError, PluginConfig
-from tollbooth.pipeline import RequestInterceptor, ResultInterceptor
+from tollbooth.config import ConfigError, GatewayConfig, PluginConfig
+from tollbooth.dlp import DlpRequestInterceptor, DlpResultInterceptor
+from tollbooth.pipeline import PolicyInterceptor, RequestInterceptor, ResultInterceptor
 
 # Built-in interceptor names: a plugin shadowing one would make audit
 # reason_ids (e.g. "interceptor-failure:policy") ambiguous.
@@ -43,6 +44,27 @@ def _instantiate(spec: PluginConfig) -> object:
         raise ConfigError(
             f"plugin {spec.plugin!r}: factory raised {type(exc).__name__}"
         ) from exc
+
+
+def build_interceptors(
+    config: GatewayConfig,
+) -> tuple[list[RequestInterceptor], list[ResultInterceptor]]:
+    """Assemble both pipeline paths from config — the ONE place stage order
+    is defined, shared by the gateway and the hook adapter (R15) so the two
+    entry points can't drift: policy, then DLP, then plugins (R13)."""
+    request: list[RequestInterceptor] = [
+        PolicyInterceptor(rules=config.policy.rules, default=config.policy.default)
+    ]
+    result: list[ResultInterceptor] = []
+    if config.dlp.enabled:
+        # Policy first (cheap, names rules), then DLP scans what policy allowed.
+        request.append(DlpRequestInterceptor(config.dlp.request_overrides()))
+        result.append(DlpResultInterceptor(config.dlp.result_overrides()))
+    # Plugins last: they tighten after built-ins, never pre-empt them.
+    plugin_set = load_plugins(config.plugins)
+    request.extend(plugin_set.request)
+    result.extend(plugin_set.result)
+    return request, result
 
 
 def load_plugins(specs: list[PluginConfig]) -> PluginSet:

@@ -31,9 +31,8 @@ from tollbooth.config import (
     load_config,
     render_starter_yaml,
 )
-from tollbooth.dlp import DlpRequestInterceptor, DlpResultInterceptor
-from tollbooth.pipeline import Pipeline, PolicyInterceptor
-from tollbooth.plugins import load_plugins
+from tollbooth.pipeline import Pipeline
+from tollbooth.plugins import build_interceptors, load_plugins
 from tollbooth.proxy import Gateway
 from tollbooth.upstream import StdioUpstream, UpstreamError
 
@@ -129,20 +128,12 @@ def build_gateway(
     audit_key: bytes | None = None,
     audit_resume: tuple[int, str] | None = None,
 ) -> Gateway:
-    """Wire config into the runtime object graph (pipeline, upstreams, gateway)."""
-    request_interceptors: list = [
-        PolicyInterceptor(rules=config.policy.rules, default=config.policy.default)
-    ]
-    result_interceptors: list = []
-    if config.dlp.enabled:
-        # Policy first (cheap, names rules), then DLP scans what policy allowed.
-        request_interceptors.append(DlpRequestInterceptor(config.dlp.request_overrides()))
-        result_interceptors.append(DlpResultInterceptor(config.dlp.result_overrides()))
-    # Plugins last (R13): they tighten after built-ins, never pre-empt them.
-    # A broken plugin raises ConfigError here — before any upstream starts.
-    plugin_set = load_plugins(config.plugins)
-    request_interceptors.extend(plugin_set.request)
-    result_interceptors.extend(plugin_set.result)
+    """Wire config into the runtime object graph (pipeline, upstreams, gateway).
+
+    Stage order lives in build_interceptors — shared with the hook adapter.
+    A broken plugin raises ConfigError here, before any upstream starts (R13).
+    """
+    request_interceptors, result_interceptors = build_interceptors(config)
     pipeline = Pipeline(
         request_interceptors=request_interceptors,
         result_interceptors=result_interceptors,

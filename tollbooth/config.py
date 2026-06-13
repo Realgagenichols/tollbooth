@@ -18,6 +18,12 @@ class ConfigError(Exception):
     """Raised for any configuration problem; message is user-facing."""
 
 
+# The hook adapter (R15) routes the client's native tools under this virtual
+# server name. Rules may target it without declaring an upstream — it never
+# launches a process.
+VIRTUAL_SERVER = "claude"
+
+
 def _yaml_error_detail(exc: yaml.YAMLError) -> str:
     """Describe a YAML error without its source snippet (which may hold secrets)."""
     if not isinstance(exc, yaml.MarkedYAMLError):
@@ -177,7 +183,11 @@ def load_config(path: str | Path) -> GatewayConfig:
     config = _validate_gateway_config(raw, source=f"config {path}")
 
     for rule in config.policy.rules:
-        if rule.server != "*" and rule.server not in config.servers:
+        if (
+            rule.server != "*"
+            and rule.server != VIRTUAL_SERVER
+            and rule.server not in config.servers
+        ):
             raise ConfigError(
                 f"invalid config {path}: rule {rule.name!r} references "
                 f"undefined server {rule.server!r}"
