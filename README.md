@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/header.svg" alt="tollbooth — a firewall + DLP + audit layer for AI agent tool traffic" width="860">
+  <img src="https://raw.githubusercontent.com/Realgagenichols/tollbooth/main/assets/header.svg" alt="tollbooth — a firewall + DLP + audit layer for AI agent tool traffic" width="860">
 </p>
 
 <p align="center">
@@ -7,7 +7,7 @@
   <a href="#"><img alt="Built on MCP" src="https://img.shields.io/badge/built%20on-MCP-58A6FF"></a>
   <a href="#development"><img alt="319 tests" src="https://img.shields.io/badge/tests-319%20passing-3FB950"></a>
   <a href="#design-decisions-that-matter"><img alt="Fail-closed by default" src="https://img.shields.io/badge/default-fail--closed-F85149"></a>
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-8957E5"></a>
+  <a href="https://github.com/Realgagenichols/tollbooth/blob/main/LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-8957E5"></a>
 </p>
 
 <p align="center">
@@ -27,7 +27,7 @@ tollbooth is that control point. It's a transparent [MCP](https://modelcontextpr
 A single config turns an unmediated agent into a governed one. The recording below is **real `tollbooth` output** — every frame is the live policy + DLP engine answering actual Claude Code hook events (reproduce it yourself with `vhs demo/demo.tape`):
 
 <p align="center">
-  <img src="assets/demo.gif" alt="tollbooth denying a curl-pipe-sh shell call, blocking an AWS key from leaving in a GitHub issue, redacting credentials out of a tool result, then verifying the tamper-evident audit chain" width="860">
+  <img src="https://raw.githubusercontent.com/Realgagenichols/tollbooth/main/assets/demo.gif" alt="tollbooth denying a curl-pipe-sh shell call, blocking an AWS key from leaving in a GitHub issue, redacting credentials out of a tool result, then verifying the tamper-evident audit chain" width="860">
 </p>
 
 Requests carrying secrets are **blocked** (egress is the exfil path). Secrets in results are **redacted in place** so the agent keeps working on real codebases instead of you disabling the control. Safe calls pass straight through, untouched. Every decision is hash-chained into a log you can prove wasn't edited — and the raw secret value appears in none of it.
@@ -317,4 +317,4 @@ uv run ruff check .    # lint
 
 ## License
 
-[MIT](LICENSE) © Gage Nichols
+[MIT](https://github.com/Realgagenichols/tollbooth/blob/main/LICENSE) © Gage Nichols

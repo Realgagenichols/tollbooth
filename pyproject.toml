@@ -1,15 +1,42 @@
 [project]
-name = "tollbooth"
+name = "mcp-tollbooth"
 version = "0.1.0"
 description = "A security gateway for AI agents: a transparent MCP proxy that enforces policy, DLP, and audit on every tool call and result."
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
+readme = "README.md"
+authors = [{ name = "Gage Nichols", email = "gagetnichols@icloud.com" }]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "security",
+    "dlp",
+    "proxy",
+    "gateway",
+    "ai-agents",
+    "audit",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "mcp>=1.27.2",
     "pydantic>=2.13.4",
     "pyyaml>=6.0.3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Realgagenichols/tollbooth"
+Repository = "https://github.com/Realgagenichols/tollbooth"
+Issues = "https://github.com/Realgagenichols/tollbooth/issues"
 
 [project.scripts]
 tollbooth = "tollbooth.main:main"
@@ -38,6 +65,11 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# Uncomment if package directory name differs from project name
-# [tool.hatch.build.targets.wheel]
-# packages = ["tollbooth"]
+# Distribution name (mcp-tollbooth) differs from the import package (tollbooth).
+[tool.hatch.build.targets.wheel]
+packages = ["tollbooth"]
+
+# Keep the sdist lean: README images are referenced by absolute URL, so the
+# media and demo fixtures don't need to ship in the package.
+[tool.hatch.build.targets.sdist]
+exclude = ["assets", "demo", "tests"]
