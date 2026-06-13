@@ -295,6 +295,8 @@ The point of tollbooth isn't that it proxies MCP — it's the judgment calls a s
 - **The config file is the security boundary.** Plugins are explicitly declared `module:factory` specs with fail-fast loading — never entry-point auto-discovery, so installing a package can't silently insert an interceptor.
 - **Plugins run after built-ins and only tighten.** A plugin can never pre-empt a built-in deny; the hook adapter's `allow` defers to the client's own prompt rather than auto-approving.
 
+> A deeper writeup — full threat model, rejected alternatives, and the reasoning behind each call — is in [**Designing a security gateway for AI agents**](https://github.com/Realgagenichols/tollbooth/blob/main/docs/security-design.md).
+
 ## Limitations
 
 Stated plainly, because a security tool that overclaims is worse than one that doesn't:
