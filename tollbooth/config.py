@@ -6,6 +6,7 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
@@ -36,14 +37,51 @@ def _yaml_error_detail(exc: yaml.YAMLError) -> str:
     return " ".join(parts) or "syntax error"
 
 
-class UpstreamConfig(BaseModel):
-    """Launch spec for one upstream stdio MCP server."""
+class StdioUpstreamConfig(BaseModel):
+    """Launch spec for one upstream stdio MCP server (subprocess)."""
 
     model_config = ConfigDict(extra="forbid")
 
     command: str
     args: list[str] = []
     env: dict[str, str] = {}
+
+
+# `${VAR}` references inside header values, resolved from the environment at
+# upstream startup (not config load — see HttpUpstream). Shape-checked here.
+_ENV_REF = re.compile(r"\$\{([A-Za-z_]\w*)\}")
+
+
+class HttpUpstreamConfig(BaseModel):
+    """Connection spec for one upstream streamable-HTTP MCP server (N1)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    headers: dict[str, str] = {}
+
+    @model_validator(mode="after")
+    def _validate(self) -> "HttpUpstreamConfig":
+        scheme = urlsplit(self.url).scheme.lower()
+        if scheme not in ("http", "https"):
+            # The URL is config, not a secret — but echo only the scheme, never
+            # the whole URL (it may carry userinfo/query credentials).
+            raise ValueError(
+                f"url scheme must be http or https, got {scheme or 'none'!r}"
+            )
+        for name, value in self.headers.items():
+            # Catch a malformed reference (`${` with no close) early; a bare
+            # literal or a well-formed ${VAR} both pass.
+            if "${" in value and not _ENV_REF.search(value):
+                raise ValueError(
+                    f"header {name!r} has a malformed ${{VAR}} reference"
+                )
+        return self
+
+
+# A server entry is classified by field presence: `command` => stdio,
+# `url` => http (matches the mcp.json convention and the S2 importer heuristic).
+UpstreamConfig = StdioUpstreamConfig | HttpUpstreamConfig
 
 
 class PolicyConfig(BaseModel):
@@ -125,10 +163,55 @@ class AuditConfig(BaseModel):
     record: Literal["metadata", "full"] = "metadata"
 
 
+def _route_server_entry(name: str, entry: object) -> object:
+    """Guard one raw server entry for stdio (`command`) vs http (`url`) presence.
+
+    Only the *neither* and *both* cases are decided here, with name-only error
+    messages (never the entry — env/header values may be secret, Pattern 11).
+    Valid entries pass through unchanged for the typed union field to validate
+    at the sanitized `_validate_gateway_config` call site.
+    """
+    if not isinstance(entry, dict):
+        return entry
+    has_command = "command" in entry
+    has_url = "url" in entry
+    if has_command and has_url:
+        raise ValueError(
+            f"server {name!r} declares both 'command' (stdio) and 'url' (http); "
+            "pick one"
+        )
+    if not has_command and not has_url:
+        raise ValueError(
+            f"server {name!r} must declare either 'command' (stdio) or 'url' (http)"
+        )
+    # Validate against the one variant presence selected, so the error names the
+    # offending field cleanly (a smart Union reports both branches). The
+    # ValidationError is rendered sanitized — its raw str() would echo input
+    # (Pattern 11), and this is a distinct model_validate call site.
+    model = StdioUpstreamConfig if has_command else HttpUpstreamConfig
+    try:
+        return model.model_validate(entry)
+    except ValidationError as exc:
+        raise ValueError(f"server {name!r}: {_render_validation_error(exc)}") from exc
+
+
 class GatewayConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     servers: dict[str, UpstreamConfig]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _classify_servers(cls, data: object) -> object:
+        if isinstance(data, dict) and isinstance(data.get("servers"), dict):
+            data = {
+                **data,
+                "servers": {
+                    name: _route_server_entry(name, entry)
+                    for name, entry in data["servers"].items()
+                },
+            }
+        return data
     policy: PolicyConfig = PolicyConfig()
     dlp: DlpConfig = DlpConfig()
     audit: AuditConfig = AuditConfig()
@@ -145,6 +228,15 @@ class GatewayConfig(BaseModel):
         return self
 
 
+def _render_validation_error(exc: ValidationError) -> str:
+    """Render a ValidationError without input_value (Pattern 11) — shared so
+    every external-input validation echoes location/type only, never values."""
+    return "; ".join(
+        f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+        for err in exc.errors(include_input=False, include_url=False)
+    )
+
+
 def _validate_gateway_config(raw: object, source: str) -> GatewayConfig:
     """Validate raw data into a GatewayConfig with a sanitized error.
 
@@ -155,11 +247,7 @@ def _validate_gateway_config(raw: object, source: str) -> GatewayConfig:
     try:
         return GatewayConfig.model_validate(raw)
     except ValidationError as exc:
-        details = "; ".join(
-            f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
-            for err in exc.errors(include_input=False, include_url=False)
-        )
-        raise ConfigError(f"invalid {source}: {details}") from exc
+        raise ConfigError(f"invalid {source}: {_render_validation_error(exc)}") from exc
 
 
 def load_config(path: str | Path) -> GatewayConfig:

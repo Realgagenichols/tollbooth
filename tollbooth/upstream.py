@@ -13,7 +13,7 @@ import mcp.types as types
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, get_default_environment, stdio_client
 
-from tollbooth.config import UpstreamConfig
+from tollbooth.config import StdioUpstreamConfig
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class StdioUpstream:
     transport uses task-scoped cancel scopes).
     """
 
-    def __init__(self, name: str, config: UpstreamConfig, init_timeout: float | None = None):
+    def __init__(self, name: str, config: StdioUpstreamConfig, init_timeout: float | None = None):
         self.name = name
         self.config = config
         self.init_timeout = init_timeout or DEFAULT_INIT_TIMEOUT

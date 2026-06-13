@@ -2,7 +2,13 @@
 
 import pytest
 
-from tollbooth.config import ConfigError, emit_client_config, load_config
+from tollbooth.config import (
+    ConfigError,
+    HttpUpstreamConfig,
+    StdioUpstreamConfig,
+    emit_client_config,
+    load_config,
+)
 
 VALID_CONFIG = """
 servers:
@@ -106,7 +112,8 @@ servers:
             load_config(write_config(tmp_path, bad))
         message = str(excinfo.value)
         assert "ghp_supersecret123" not in message
-        assert "servers.gh.envv" in message  # location stays actionable
+        # Location stays actionable: names the server and the offending field.
+        assert "gh" in message and "envv" in message
 
     @pytest.mark.regression
     def test_yaml_error_never_echoes_source_snippet(self, tmp_path):
@@ -247,3 +254,69 @@ class TestPluginsConfig:
         bad = self.PLUGINS.replace("settings:", "setings:")
         with pytest.raises(ConfigError, match="setings"):
             load_config(write_config(tmp_path, bad))
+
+
+class TestServerClassification:
+    """N1: presence-based stdio (`command`) vs http (`url`) classification."""
+
+    def test_command_entry_is_stdio(self, tmp_path):
+        cfg = "servers:\n  fs:\n    command: fake-fs-server\n"
+        config = load_config(write_config(tmp_path, cfg))
+        assert isinstance(config.servers["fs"], StdioUpstreamConfig)
+
+    def test_url_entry_is_http(self, tmp_path):
+        cfg = (
+            "servers:\n  remote:\n"
+            "    url: https://api.example.com/mcp\n"
+            "    headers:\n      Authorization: Bearer ${REMOTE_TOKEN}\n"
+        )
+        config = load_config(write_config(tmp_path, cfg))
+        remote = config.servers["remote"]
+        assert isinstance(remote, HttpUpstreamConfig)
+        assert remote.url == "https://api.example.com/mcp"
+        assert remote.headers == {"Authorization": "Bearer ${REMOTE_TOKEN}"}
+
+    def test_mixed_stdio_and_http(self, tmp_path):
+        cfg = (
+            "servers:\n"
+            "  fs:\n    command: fake-fs-server\n"
+            "  remote:\n    url: http://localhost:9000/mcp\n"
+        )
+        config = load_config(write_config(tmp_path, cfg))
+        assert isinstance(config.servers["fs"], StdioUpstreamConfig)
+        assert isinstance(config.servers["remote"], HttpUpstreamConfig)
+
+    def test_entry_with_neither_rejected(self, tmp_path):
+        cfg = "servers:\n  bad:\n    args: ['--x']\n"
+        with pytest.raises(ConfigError, match="bad.*either 'command'.*or 'url'"):
+            load_config(write_config(tmp_path, cfg))
+
+    def test_entry_with_both_rejected(self, tmp_path):
+        cfg = "servers:\n  bad:\n    command: x\n    url: http://localhost/mcp\n"
+        with pytest.raises(ConfigError, match="bad.*both 'command'.*'url'"):
+            load_config(write_config(tmp_path, cfg))
+
+    def test_non_http_scheme_rejected(self, tmp_path):
+        cfg = "servers:\n  bad:\n    url: ftp://example.com/mcp\n"
+        with pytest.raises(ConfigError, match="scheme must be http"):
+            load_config(write_config(tmp_path, cfg))
+
+    def test_malformed_env_ref_in_header_rejected(self, tmp_path):
+        cfg = (
+            "servers:\n  remote:\n"
+            "    url: https://api.example.com/mcp\n"
+            "    headers:\n      Authorization: 'Bearer ${BROKEN'\n"
+        )
+        with pytest.raises(ConfigError, match="malformed"):
+            load_config(write_config(tmp_path, cfg))
+
+    def test_http_classification_error_never_echoes_header_secret(self, tmp_path):
+        """A bad url next to a secret header must not leak the secret."""
+        cfg = (
+            "servers:\n  remote:\n"
+            "    url: ftp://example.com/mcp\n"
+            "    headers:\n      Authorization: Bearer ghp_httpsecret789\n"
+        )
+        with pytest.raises(ConfigError) as excinfo:
+            load_config(write_config(tmp_path, cfg))
+        assert "ghp_httpsecret789" not in str(excinfo.value)

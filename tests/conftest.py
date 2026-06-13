@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tollbooth.config import UpstreamConfig
+from tollbooth.config import StdioUpstreamConfig
 
 ECHO_SERVER = Path(__file__).parent / "echo_server.py"
 
@@ -31,6 +31,6 @@ def make_upstream_config():
             "env": {},
         }
         defaults.update(kwargs)
-        return UpstreamConfig.model_validate(defaults)
+        return StdioUpstreamConfig.model_validate(defaults)
 
     return _factory
