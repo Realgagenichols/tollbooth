@@ -241,3 +241,32 @@ class TestEventModels:
             {"tool_name": "Bash", "tool_response": {"text": "hi"}}
         )
         assert event.tool_response == {"text": "hi"}
+
+
+class TestPostPathStructuredLeaves:
+    """Section 3 review: keys/numbers get the same coverage as the gateway's
+    structuredContent walk — a PAN as a JSON number or a secret as a dict key
+    must not slip past a string-only walk."""
+
+    def test_pan_as_json_number_withholds(self, hook_config):
+        config, _ = hook_config
+        _, out = run("post", config, post_payload("Read", {}, {"card": 4111111111111111}))
+        updated = out["hookSpecificOutput"]["updatedToolOutput"]
+        assert isinstance(updated, str)
+        assert "withheld" in updated
+        assert "4111111111111111" not in json.dumps(out)
+
+    def test_secret_as_dict_key_withholds(self, hook_config):
+        config, _ = hook_config
+        _, out = run("post", config, post_payload("Read", {}, {AWS_KEY: "balance"}))
+        updated = out["hookSpecificOutput"]["updatedToolOutput"]
+        assert isinstance(updated, str)
+        assert "withheld" in updated
+        assert AWS_KEY not in json.dumps(out)
+
+    def test_benign_numbers_and_bools_pass(self, hook_config):
+        config, _ = hook_config
+        response = {"count": 42, "ratio": 3.14, "ok": True, "note": "fine"}
+        code, out = run("post", config, post_payload("Read", {}, response))
+        assert code == 0
+        assert out is None

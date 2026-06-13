@@ -121,16 +121,32 @@ class _Withheld(Exception):
         self.message = message
 
 
-def _map_string_leaves(node: Any, transform) -> Any:
-    """Apply transform to every string leaf, preserving structure (and dict
-    keys — keys are schema). Scans the RAW string representation the DLP
-    patterns were written for, never a serialized blob (Pattern 12)."""
+def _scan_tree(node: Any, scan, refuse) -> Any:
+    """Scan every leaf of a tool_response, preserving structure. Mirrors the
+    gateway's structuredContent walk (proxy._scan_structured): raw string
+    leaves are scanned/redacted in place (Pattern 12 — never a serialized
+    blob); numeric leaves and dict keys are scanned via their string form and
+    REFUSED (result withheld) when they'd need redaction — rewriting a number
+    or renaming a key would corrupt the response shape (R4).
+
+    scan(text) returns possibly-transformed text (raising on block);
+    refuse(kind) raises to withhold the whole result.
+    """
     if isinstance(node, str):
-        return transform(node)
+        return scan(node)
+    if isinstance(node, int | float):
+        if scan(str(node)) != str(node):
+            refuse("numeric leaf")
+        return node
     if isinstance(node, list):
-        return [_map_string_leaves(item, transform) for item in node]
+        return [_scan_tree(item, scan, refuse) for item in node]
     if isinstance(node, dict):
-        return {key: _map_string_leaves(value, transform) for key, value in node.items()}
+        scanned: dict = {}
+        for key, value in node.items():
+            if isinstance(key, str) and scan(key) != key:
+                refuse("dict key")
+            scanned[key] = _scan_tree(value, scan, refuse)
+        return scanned
     return node
 
 
@@ -150,8 +166,18 @@ def handle_post(event: PostToolUseEvent, pipeline: Pipeline) -> dict | None:
             changed = True
         return verdict.content
 
+    def refuse(kind: str) -> None:
+        # Log names the location kind only — never the value (Pattern 11).
+        log.error(
+            "%s in tool_response of %s/%s needs redaction", kind, call.server, call.tool
+        )
+        raise _Withheld(
+            f"tollbooth: result of {call.server}/{call.tool} withheld — "
+            "sensitive data in structured content could not be redacted."
+        )
+
     try:
-        updated = _map_string_leaves(event.tool_response, scan)
+        updated = _scan_tree(event.tool_response, scan, refuse)
     except _Withheld as withheld:
         return _hook_output(kind="post", fields={"updatedToolOutput": withheld.message})
     if not changed:
