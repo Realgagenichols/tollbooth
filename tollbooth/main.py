@@ -35,7 +35,7 @@ from tollbooth.hook import emit_hooks_config, run_hook
 from tollbooth.pipeline import Pipeline
 from tollbooth.plugins import build_interceptors, load_plugins
 from tollbooth.proxy import Gateway
-from tollbooth.upstream import StdioUpstream, UpstreamError
+from tollbooth.upstream import UpstreamError, build_upstream
 
 log = logging.getLogger(__name__)
 
@@ -166,7 +166,7 @@ def build_gateway(
             path=config.audit.log,
         ),
     )
-    upstreams = {name: StdioUpstream(name, spec) for name, spec in config.servers.items()}
+    upstreams = {name: build_upstream(name, spec) for name, spec in config.servers.items()}
     return Gateway(upstreams=upstreams, pipeline=pipeline)
 
 

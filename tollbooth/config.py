@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -50,6 +51,22 @@ class StdioUpstreamConfig(BaseModel):
 # `${VAR}` references inside header values, resolved from the environment at
 # upstream startup (not config load — see HttpUpstream). Shape-checked here.
 _ENV_REF = re.compile(r"\$\{([A-Za-z_]\w*)\}")
+
+
+def expand_env_refs(value: str, env: Mapping[str, str]) -> str:
+    """Replace every `${VAR}` in `value` using `env`.
+
+    Raises KeyError(var_name) if a referenced variable is unset, so the caller
+    can fail closed naming the variable — never the (secret) resolved value.
+    """
+
+    def _replace(match: re.Match[str]) -> str:
+        var = match.group(1)
+        if var not in env:
+            raise KeyError(var)
+        return env[var]
+
+    return _ENV_REF.sub(_replace, value)
 
 
 class HttpUpstreamConfig(BaseModel):

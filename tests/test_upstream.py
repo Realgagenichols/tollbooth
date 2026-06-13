@@ -1,4 +1,7 @@
-"""Tests for R1: upstream transport (stdio lifecycle, discovery, forwarding)."""
+"""Tests for R1: upstream transport (stdio lifecycle, discovery, forwarding).
+
+N1 adds streamable-HTTP upstream coverage (TestHttpUpstream).
+"""
 
 import sys
 
@@ -74,3 +77,129 @@ async def test_command_exiting_early_raises_named_error(make_upstream_config):
             await upstream.start()
     finally:
         await upstream.aclose()
+
+
+# --- N1: streamable HTTP upstream --------------------------------------------
+
+
+async def test_http_fixture_smoke(http_upstream_url):
+    """The HTTP test server fixture serves a real, initializable MCP endpoint."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    async with (
+        streamable_http_client(http_upstream_url) as (read, write, _),
+        ClientSession(read, write) as session,
+    ):
+        await session.initialize()
+        result = await session.list_tools()
+    assert {t.name for t in result.tools} == {"echo", "leak", "echo_header"}
+
+
+def _http_config(url, headers=None):
+    from tollbooth.config import HttpUpstreamConfig
+
+    return HttpUpstreamConfig.model_validate({"url": url, "headers": headers or {}})
+
+
+async def test_http_pass_through(http_upstream_url):
+    """N1: list + forward a tool call over streamable HTTP."""
+    from tollbooth.upstream import HttpUpstream
+
+    upstream = HttpUpstream("remote", _http_config(http_upstream_url))
+    try:
+        await upstream.start()
+        tools = await upstream.list_tools()
+        assert {t.name for t in tools} == {"echo", "leak", "echo_header"}
+        result = await upstream.call_tool("echo", {"text": "hi"})
+        assert result.isError is False
+        assert result.content[0].text == "echo: hi"
+    finally:
+        await upstream.aclose()
+
+
+async def test_http_header_env_expansion(http_upstream_url, monkeypatch):
+    """N1: ${ENV_VAR} in a header is resolved and reaches the server."""
+    from tollbooth.upstream import HttpUpstream
+
+    monkeypatch.setenv("REMOTE_TOKEN", "s3cr3t-token-value")
+    upstream = HttpUpstream(
+        "remote",
+        _http_config(http_upstream_url, {"X-Auth": "Bearer ${REMOTE_TOKEN}"}),
+    )
+    try:
+        await upstream.start()
+        result = await upstream.call_tool("echo_header", {"name": "x-auth"})
+        assert result.content[0].text == "Bearer s3cr3t-token-value"
+    finally:
+        await upstream.aclose()
+
+
+async def test_http_missing_env_var_fails_closed_without_echo(http_upstream_url, monkeypatch):
+    """N1: an unset ${VAR} fails closed naming server + var, never the value."""
+    from tollbooth.upstream import HttpUpstream
+
+    monkeypatch.delenv("REMOTE_TOKEN", raising=False)
+    upstream = HttpUpstream(
+        "remote",
+        _http_config(http_upstream_url, {"X-Auth": "Bearer ${REMOTE_TOKEN}"}),
+    )
+    try:
+        with pytest.raises(UpstreamError) as excinfo:
+            await upstream.start()
+        message = str(excinfo.value)
+        assert "remote" in message and "REMOTE_TOKEN" in message
+        assert "Bearer" not in message  # the header value never appears
+    finally:
+        await upstream.aclose()
+
+
+async def test_http_error_sanitizes_url_credentials():
+    """N1: errors echo only the origin — never userinfo, path, or query."""
+    from tollbooth.upstream import HttpUpstream
+
+    # Unreachable port; URL carries userinfo + a token query param.
+    url = "http://user:pa55w0rd@127.0.0.1:1/secret/path?token=qsecret123"
+    upstream = HttpUpstream("remote", _http_config(url), init_timeout=2)
+    try:
+        with pytest.raises(UpstreamError) as excinfo:
+            await upstream.start()
+        message = str(excinfo.value)
+        assert "http://127.0.0.1:1" in message
+        for leaked in ("user", "pa55w0rd", "secret/path", "qsecret123", "token="):
+            assert leaked not in message
+    finally:
+        await upstream.aclose()
+
+
+async def test_http_double_start_rejected(http_upstream_url):
+    from tollbooth.upstream import HttpUpstream
+
+    upstream = HttpUpstream("remote", _http_config(http_upstream_url))
+    try:
+        await upstream.start()
+        with pytest.raises(UpstreamError, match="already running"):
+            await upstream.start()
+    finally:
+        await upstream.aclose()
+
+
+async def test_http_call_after_aclose_raises_not_running(http_upstream_url):
+    from tollbooth.upstream import HttpUpstream
+
+    upstream = HttpUpstream("remote", _http_config(http_upstream_url))
+    await upstream.start()
+    await upstream.aclose()
+    with pytest.raises(UpstreamError, match="not running"):
+        await upstream.call_tool("echo", {"text": "hi"})
+
+
+def test_build_upstream_dispatches_on_type(http_upstream_url):
+    """N1: the factory picks the transport matching the config type."""
+    from tollbooth.config import StdioUpstreamConfig
+    from tollbooth.upstream import HttpUpstream, StdioUpstream, build_upstream
+
+    stdio = build_upstream("fs", StdioUpstreamConfig(command="x"))
+    http = build_upstream("remote", _http_config(http_upstream_url))
+    assert isinstance(stdio, StdioUpstream)
+    assert isinstance(http, HttpUpstream)
