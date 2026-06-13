@@ -82,6 +82,20 @@ client ◀──result──── tollbooth ◀── [ DLP-result → plugins 
 
 One aggregating gateway process is an MCP **server** to your client and an MCP **client** to N upstream servers. It exposes the union of upstream tools, namespaced `{server}_{tool}`, routed through a mapping table (never string-splitting — server names can contain underscores). Absent any policy, behavior is identical to a direct connection.
 
+## Install
+
+```bash
+pip install mcp-tollbooth        # or:  uv add mcp-tollbooth
+```
+
+Or run it without installing anything:
+
+```bash
+uvx --from mcp-tollbooth tollbooth --help
+```
+
+> The distribution is **`mcp-tollbooth`** (the name `tollbooth` was taken on PyPI); the command and the import package are both **`tollbooth`**.
+
 ## Quickstart
 
 ```bash
