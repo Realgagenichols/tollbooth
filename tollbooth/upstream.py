@@ -39,6 +39,8 @@ def _url_origin(url: str) -> str:
     try:
         parts = urlsplit(url)
         host = parts.hostname or ""
+        if ":" in host:  # IPv6 literal — re-bracket so host:port stays parseable
+            host = f"[{host}]"
         origin = f"{parts.scheme}://{host}"
         if parts.port is not None:
             origin += f":{parts.port}"
@@ -231,7 +233,9 @@ class HttpUpstream:
             # external cancel — propagate it untouched.
             cause = await self._teardown()
             root = exc if isinstance(exc, Exception) else cause
-            if root is None:
+            # A cancellation (from `exc` or surfaced by teardown running inside
+            # the cancelled scope) is NOT a concrete failure: honor the cancel.
+            if root is None or isinstance(root, anyio.get_cancelled_exc_class()):
                 raise
             # Origin + exception TYPE only: the raw URL may carry credentials and
             # transport exceptions can echo headers/URLs (Pattern 11).

@@ -58,7 +58,7 @@ class Gateway:
                 stack.push_async_callback(upstream.aclose)
             # All started — detach the callbacks so the upstreams stay running.
             # The detached stack is intentionally discarded: shutdown is owned
-            # by Gateway.aclose() (StdioUpstream.aclose is idempotent).
+            # by Gateway.aclose() (every upstream's aclose is idempotent).
             stack.pop_all()
 
     async def aclose(self) -> None:

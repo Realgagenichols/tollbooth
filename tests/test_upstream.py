@@ -194,6 +194,33 @@ async def test_http_call_after_aclose_raises_not_running(http_upstream_url):
         await upstream.call_tool("echo", {"text": "hi"})
 
 
+async def test_http_external_cancellation_propagates():
+    """N1: a genuine external cancel during start() must NOT become UpstreamError.
+
+    Distinguishes real cancellation from a transport connection failure (which
+    is also a cancellation internally but carries a concrete cause).
+    """
+    import anyio
+
+    from tollbooth.upstream import HttpUpstream
+
+    # A port that black-holes the connect so start() is mid-initialize when the
+    # surrounding scope cancels it (10.255.255.1 is non-routable → hangs).
+    upstream = HttpUpstream(
+        "remote", _http_config("http://10.255.255.1:9/mcp"), init_timeout=30
+    )
+    cancelled = False
+    try:
+        with anyio.move_on_after(0.3) as scope:
+            await upstream.start()
+        cancelled = scope.cancelled_caught
+    finally:
+        await upstream.aclose()
+    # The external cancel was honored (scope caught it) — start() did not swallow
+    # it into an UpstreamError.
+    assert cancelled is True
+
+
 def test_build_upstream_dispatches_on_type(http_upstream_url):
     """N1: the factory picks the transport matching the config type."""
     from tollbooth.config import StdioUpstreamConfig
