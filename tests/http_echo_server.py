@@ -32,4 +32,12 @@ def make_app() -> FastMCP:
         value = request.headers.get(name) if request is not None else None
         return value or "<absent>"
 
+    @app.tool()
+    async def slow(seconds: float) -> str:
+        """Sleep, to exercise shutdown while a call is in flight."""
+        import anyio
+
+        await anyio.sleep(seconds)
+        return "done"
+
     return app

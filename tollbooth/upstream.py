@@ -205,6 +205,7 @@ class HttpUpstream:
         self.config = config
         self.init_timeout = init_timeout or DEFAULT_INIT_TIMEOUT
         self._stack: AsyncExitStack | None = None
+        self._tg: anyio.abc.TaskGroup | None = None
         self._req_send: MemoryObjectSendStream | None = None
         self._ready = anyio.Event()
         self._init_error: BaseException | None = None
@@ -236,8 +237,8 @@ class HttpUpstream:
         try:
             # The runner is a child of THIS task group (scope in our task). The
             # runner catches everything, so its failures never cancel us.
-            tg = await self._stack.enter_async_context(anyio.create_task_group())
-            tg.start_soon(self._run, req_recv, headers)
+            self._tg = await self._stack.enter_async_context(anyio.create_task_group())
+            self._tg.start_soon(self._run, req_recv, headers)
             # The runner sets _ready on success or failure; initialize() (the
             # first byte on the wire) is fail_after-wrapped, so a hung connect
             # can't outlast init_timeout. The +5 is a pure backstop.
@@ -273,7 +274,9 @@ class HttpUpstream:
         request channel closes. Catches EVERYTHING — a transport failure here
         must never reach the parent task group in the gateway's main task."""
         try:
-            async with AsyncExitStack() as stack:
+            # `requests` is the outermost context so req_recv is always closed,
+            # even on an init-failure exit before the serve loop.
+            async with requests, AsyncExitStack() as stack:
                 # We own the httpx client (configured with headers), so we manage
                 # its lifecycle here; streamable_http_client won't when supplied.
                 client = create_mcp_http_client(headers=headers or None)
@@ -287,9 +290,8 @@ class HttpUpstream:
                 with anyio.fail_after(self.init_timeout):
                     await session.initialize()
                 self._ready.set()
-                async with requests:
-                    async for call in requests:
-                        await self._serve(session, call)
+                async for call in requests:
+                    await self._serve(session, call)
         except BaseException as exc:  # noqa: BLE001 - must not escape this task
             if not self._ready.is_set():
                 # Failed before signalling start(): record the cause for start().
@@ -343,6 +345,9 @@ class HttpUpstream:
         try:
             await self._req_send.send(_Call(method, tool, args, reply_send))
         except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+            # The runner never received the call, so it won't close reply_send.
+            reply_send.close()
+            reply_recv.close()
             raise UpstreamError(f"upstream {self.name!r} is not running") from None
         async with reply_recv:
             ok, payload = await reply_recv.receive()
@@ -369,12 +374,19 @@ class HttpUpstream:
         )
 
     async def _shutdown(self) -> None:
-        """Stop the runner and close the transport; never propagates."""
+        """Stop the runner and close the transport; never propagates a
+        non-cancellation exception (a cancel of our own task still propagates)."""
         self._closed = True
         if self._req_send is not None:
             with suppress(anyio.ClosedResourceError, anyio.BrokenResourceError):
                 await self._req_send.aclose()  # ends the runner's `async for`
             self._req_send = None
+        if self._tg is not None:
+            # Closing req_send ends an idle runner cleanly; but if it's stuck in
+            # an in-flight RPC, an SSE read can block ~5min — cancel its scope so
+            # teardown can't stall sibling upstreams. _run catches the cancel.
+            self._tg.cancel_scope.cancel()
+            self._tg = None
         if self._stack is not None:
             stack, self._stack = self._stack, None
             try:

@@ -93,7 +93,7 @@ async def test_http_fixture_smoke(http_server):
     ):
         await session.initialize()
         result = await session.list_tools()
-    assert {t.name for t in result.tools} == {"echo", "leak", "echo_header"}
+    assert {t.name for t in result.tools} == {"echo", "leak", "echo_header", "slow"}
 
 
 def _http_config(url, headers=None):
@@ -110,7 +110,7 @@ async def test_http_pass_through(http_server):
     try:
         await upstream.start()
         tools = await upstream.list_tools()
-        assert {t.name for t in tools} == {"echo", "leak", "echo_header"}
+        assert {t.name for t in tools} == {"echo", "leak", "echo_header", "slow"}
         result = await upstream.call_tool("echo", {"text": "hi"})
         assert result.isError is False
         assert result.content[0].text == "echo: hi"
@@ -219,6 +219,29 @@ async def test_http_external_cancellation_propagates():
     # The external cancel was honored (scope caught it) — start() did not swallow
     # it into an UpstreamError.
     assert cancelled is True
+
+
+async def test_http_aclose_does_not_block_on_in_flight_call(http_server):
+    """N1: aclose() must not wait for an in-flight RPC (an SSE read can block
+    ~5min) — it cancels the runner so shutdown stays prompt."""
+    import contextlib
+
+    import anyio
+
+    from tollbooth.upstream import HttpUpstream
+
+    upstream = HttpUpstream("remote", _http_config(http_server.url))
+    await upstream.start()
+    async with anyio.create_task_group() as tg:
+
+        async def slow_call():
+            with contextlib.suppress(UpstreamError):
+                await upstream.call_tool("slow", {"seconds": 30})
+
+        tg.start_soon(slow_call)
+        await anyio.sleep(0.3)  # let the call get in flight
+        with anyio.fail_after(5):  # would be ~30s if aclose waited for the call
+            await upstream.aclose()
 
 
 def test_build_upstream_dispatches_on_type(http_server):

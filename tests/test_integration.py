@@ -597,7 +597,7 @@ audit_log: {audit_path}
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
         names = {t.name for t in (await session.list_tools()).tools}
-        assert {"remote_echo", "remote_leak", "remote_echo_header"} == names
+        assert {"remote_echo", "remote_leak", "remote_echo_header", "remote_slow"} == names
 
         allowed = await session.call_tool("remote_echo", {"text": "hi"})
         assert allowed.isError is False
