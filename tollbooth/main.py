@@ -152,6 +152,9 @@ def build_gateway(
             key=audit_key,
             resume=audit_resume,
             record=config.audit.record,
+            # File-aware mode: re-seed under flock if hook processes (R15)
+            # appended since our last write, so one log stays one chain.
+            path=config.audit.log,
         ),
     )
     upstreams = {name: StdioUpstream(name, spec) for name, spec in config.servers.items()}

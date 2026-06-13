@@ -265,7 +265,14 @@ def _line_digest(line: str, key: bytes | None) -> str:
 class AuditLogger:
     """Writes one JSON object per line to a text stream; lines form a hash
     chain (R8). seq/prev state is guarded by the same lock that serializes
-    writes — concurrent tool calls share one stream (Pattern 8)."""
+    writes — concurrent tool calls share one stream (Pattern 8).
+
+    With `path` set (M4/R15), the logger is file-aware: every emit takes an
+    exclusive flock and re-seeds seq/prev from the file tail when another
+    writer appended since our last write — so a long-running gateway and
+    short-lived `tollbooth hook` processes can share one log without breaking
+    the chain. POSIX-only (flock); tollbooth targets macOS/Linux.
+    """
 
     def __init__(
         self,
@@ -274,6 +281,8 @@ class AuditLogger:
         key: bytes | None = None,
         resume: tuple[int, str] | None = None,
         record: str = "metadata",
+        session_id: str | None = None,
+        path: str | Path | None = None,
     ):
         if record not in ("metadata", "full"):
             # Enum-like options raise on unknown values at construction —
@@ -283,8 +292,13 @@ class AuditLogger:
         self._lock = threading.Lock()
         self._key = key  # read once here; never logged (R8)
         self._record = record
-        # One logger per gateway run, so this IS the session id (R9).
-        self.session_id = uuid.uuid4().hex
+        self._path = Path(path) if path is not None else None
+        # Byte size of the file after our last write; None = never written,
+        # which forces a tail re-seed on the first file-aware emit.
+        self._offset: int | None = None
+        # One logger per gateway run, so this IS the session id (R9) — unless
+        # the caller correlates to an external session (hook adapter, R15).
+        self.session_id = session_id or uuid.uuid4().hex
         if resume is None:
             self._seq = 0
             self._prev = GENESIS
@@ -293,25 +307,52 @@ class AuditLogger:
             self._seq = last_seq + 1
             self._prev = _line_digest(last_line, key)
 
+    def _write_event(self, fields: dict) -> None:
+        # Chain/identity keys are spread LAST so no caller-supplied field
+        # can ever shadow them (matters once M4 plugins emit events).
+        event = {
+            **fields,
+            "v": SCHEMA_VERSION,
+            "ts": datetime.now(UTC).isoformat(),
+            "seq": self._seq,
+            "prev": self._prev,
+            "session": self.session_id,
+        }
+        # default=str: a payload value that isn't JSON-native must not
+        # crash the trail (full mode records arbitrary tool args).
+        line = json.dumps(event, ensure_ascii=False, default=str)
+        self._stream.write(line + "\n")
+        self._stream.flush()
+        self._prev = _line_digest(line, self._key)
+        self._seq += 1
+
+    def _reseed_from_tail(self) -> None:
+        state = tail_state(self._path)
+        if state is None:
+            self._seq, self._prev = 0, GENESIS
+        else:
+            last_seq, last_line = state
+            self._seq = last_seq + 1
+            self._prev = _line_digest(last_line, self._key)
+
     def _emit(self, fields: dict) -> None:
         with self._lock:
-            # Chain/identity keys are spread LAST so no caller-supplied field
-            # can ever shadow them (matters once M4 plugins emit events).
-            event = {
-                **fields,
-                "v": SCHEMA_VERSION,
-                "ts": datetime.now(UTC).isoformat(),
-                "seq": self._seq,
-                "prev": self._prev,
-                "session": self.session_id,
-            }
-            # default=str: a payload value that isn't JSON-native must not
-            # crash the trail (full mode records arbitrary tool args).
-            line = json.dumps(event, ensure_ascii=False, default=str)
-            self._stream.write(line + "\n")
-            self._stream.flush()
-            self._prev = _line_digest(line, self._key)
-            self._seq += 1
+            if self._path is None:
+                self._write_event(fields)
+                return
+            import fcntl  # POSIX-only; deferred so import of this module isn't
+
+            fd = self._stream.fileno()
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                if os.fstat(fd).st_size != self._offset:
+                    # Another writer appended (or this is our first write):
+                    # cached seq/prev are stale — re-seed from the tail (R8).
+                    self._reseed_from_tail()
+                self._write_event(fields)
+                self._offset = os.fstat(fd).st_size
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
 
     def session_start(self, *, gateway_version: str, config_digest: str) -> None:
         """Open a session in the trail (R9): which gateway, under WHICH config

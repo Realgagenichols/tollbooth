@@ -763,3 +763,92 @@ class TestReaderHardening:
                 reason_id=None, args={"note": "session-imposter"},
             )
         assert query_events(log, session="session-imposter") == []
+
+
+class TestCrossProcessChain:
+    """R15/R8: file-aware loggers re-seed under flock so multiple writers
+    (gateway + short-lived hook processes) keep one valid chain."""
+
+    @staticmethod
+    def _file_logger(path, **kwargs):
+        stream = open(path, "a", encoding="utf-8")  # noqa: SIM115 - closed by test
+        return AuditLogger(stream, path=path, **kwargs), stream
+
+    @staticmethod
+    def _decide(logger, tool="read_file"):
+        logger.decision(
+            path="request", server="fs", tool=tool, decision="allow", reason_id=None
+        )
+
+    def test_session_id_override(self):
+        stream = io.StringIO()
+        logger = AuditLogger(stream, session_id="claude-session-1")
+        self._decide(logger)
+        event = json.loads(stream.getvalue())
+        assert event["session"] == "claude-session-1"
+
+    def test_generated_session_id_when_unset(self):
+        logger = AuditLogger(io.StringIO())
+        assert logger.session_id
+
+    def test_interleaved_writers_keep_chain_valid(self, tmp_path):
+        from tollbooth.audit import verify_chain
+
+        log = tmp_path / "audit.jsonl"
+        gateway_logger, gw_stream = self._file_logger(log)
+        self._decide(gateway_logger, "one")
+        # A hook process appends while the gateway logger holds cached state.
+        hook_logger, hook_stream = self._file_logger(log, session_id="hook-s")
+        self._decide(hook_logger, "two")
+        hook_stream.close()
+        # The gateway's next write must detect the external append and re-seed.
+        self._decide(gateway_logger, "three")
+        gw_stream.close()
+        head = verify_chain(log)
+        assert head.events == 3
+        tools = [json.loads(line)["tool"] for line in log.read_text().splitlines()]
+        assert tools == ["one", "two", "three"]
+
+    def test_sequential_hook_processes_chain_across_invocations(self, tmp_path):
+        from tollbooth.audit import verify_chain
+
+        log = tmp_path / "audit.jsonl"
+        for n in range(3):
+            logger, stream = self._file_logger(log, session_id=f"s{n}")
+            self._decide(logger)
+            stream.close()
+        head = verify_chain(log)
+        assert head.events == 3
+        assert head.seq == 2
+
+    def test_keyed_chain_reseeds_with_key(self, tmp_path):
+        from tollbooth.audit import verify_chain
+
+        log = tmp_path / "audit.jsonl"
+        key = b"k" * 32
+        for _ in range(2):
+            logger, stream = self._file_logger(log, key=key)
+            self._decide(logger)
+            stream.close()
+        assert verify_chain(log, key=key).events == 2
+
+    def test_concurrent_threaded_writers_one_file(self, tmp_path):
+        """Pattern 8: N writers, one file, flock-serialized appends."""
+        import threading
+
+        from tollbooth.audit import verify_chain
+
+        log = tmp_path / "audit.jsonl"
+
+        def write_some(n):
+            logger, stream = self._file_logger(log, session_id=f"w{n}")
+            for _ in range(5):
+                self._decide(logger)
+            stream.close()
+
+        threads = [threading.Thread(target=write_some, args=(n,)) for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert verify_chain(log).events == 20
