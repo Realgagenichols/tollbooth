@@ -37,6 +37,27 @@ uv run tollbooth emit-config -c tollbooth.yaml
 
 The client then talks to `tollbooth run -c tollbooth.yaml`, which proxies everything through the policy pipeline.
 
+## Upstream servers
+
+Each entry under `servers:` is classified by which field it declares — `command` for a local stdio server (a subprocess), or `url` for a remote streamable-HTTP server. An entry with neither, or both, is a config error.
+
+```yaml
+servers:
+  fs:                                    # stdio: tollbooth launches the subprocess
+    command: my-fs-server
+    args: [--root, /data]
+    env:
+      LOG_LEVEL: info
+  remote:                                # http: tollbooth connects to the URL
+    url: https://api.example.com/mcp
+    headers:
+      Authorization: Bearer ${REMOTE_TOKEN}
+```
+
+HTTP header values may reference environment variables as `${VAR}`, resolved at startup — so tokens live in the environment, never in `tollbooth.yaml`. A referenced variable that is unset fails closed at startup, naming the variable (never its value). `tollbooth import` brings both `command` and `url` entries in from an existing client config.
+
+> OAuth for HTTP upstreams (interactive login + token refresh) is **not** supported yet — use a `${VAR}` bearer token from a long-lived or externally-refreshed credential. Tracked as a future change (N2).
+
 ## Policy rules
 
 ```yaml
