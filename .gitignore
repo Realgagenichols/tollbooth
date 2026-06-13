@@ -33,3 +33,7 @@ docs/design/
 # Local gateway runtime artifacts
 /tollbooth.yaml
 tollbooth-audit.jsonl
+
+# Generated demo artifacts (regenerate with `vhs demo/demo.tape`)
+demo/demo-audit.jsonl
+assets/demo.webm

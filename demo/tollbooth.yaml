@@ -1,0 +1,29 @@
+# Demo config for the tollbooth README/site recording.
+# Every line in the cast is REAL `tollbooth` output driven by this config.
+# Reproduce: `vhs demo/demo.tape` from the repo root.
+servers:
+  # `hook` never launches upstreams — this is declared only so the config is
+  # representative. (The recording drives the Claude Code hook adapter, which
+  # governs the client's own tools without a live MCP server.)
+  github:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+
+policy:
+  default: allow            # transparent by default; the rules below are the guardrails
+  failure_mode: closed
+  rules:
+    - name: no-curl-pipe-sh
+      action: deny
+      server: claude         # Claude Code's own tools route as server "claude"
+      tool: Bash
+      where:
+        command:
+          regex: "curl.*\\|\\s*sh"
+
+dlp:
+  enabled: true
+
+audit:
+  log: ./demo/demo-audit.jsonl
+  record: metadata
