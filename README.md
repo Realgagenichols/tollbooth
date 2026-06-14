@@ -137,7 +137,29 @@ servers:
 
 HTTP header values may reference environment variables as `${VAR}`, resolved at startup — so tokens live in the environment, never in `tollbooth.yaml`. A referenced variable that is unset fails closed at startup, naming the variable (never its value). Errors about an HTTP upstream echo only the URL **origin** (`scheme://host[:port]`) — never userinfo, path, query, or header content. A dead HTTP upstream returns a clean error for *its* calls without taking the gateway down. `tollbooth import` brings both `command` and `url` entries in from an existing client config.
 
-> OAuth for HTTP upstreams (interactive login + token refresh) is **not** supported yet — use a `${VAR}` bearer token from a long-lived or externally-refreshed credential. Tracked as a future change (N2).
+### OAuth for HTTP upstreams
+
+For servers that require an interactive OAuth grant (rather than a long-lived `${VAR}` bearer token), declare an `auth` block:
+
+```yaml
+servers:
+  remote:
+    url: https://mcp.example.com/mcp
+    auth:
+      type: oauth
+      scopes: [mcp:read, mcp:write]   # optional
+      callback_port: 8765             # optional loopback redirect port (default 8765)
+```
+
+Authenticate once, interactively:
+
+```bash
+tollbooth auth login remote -c tollbooth.yaml   # opens a browser; stores the token
+tollbooth auth status       -c tollbooth.yaml   # shows token presence/expiry (never values)
+tollbooth auth logout remote                    # deletes the stored token
+```
+
+Tokens are stored under `$XDG_DATA_HOME/tollbooth/oauth/<server>.json` (default `~/.local/share/...`), file mode `0600` in a `0700` directory. When the gateway runs, a valid token is used as-is and an expired one is **refreshed silently** — no browser. If no usable token remains (and refresh fails), that upstream **fails closed** with a clear message to re-run `tollbooth auth login`; the gateway and other upstreams keep working. Access/refresh tokens are never written to logs, errors, or the audit log.
 
 ## Policy rules
 
@@ -302,7 +324,6 @@ The point of tollbooth isn't that it proxies MCP — it's the judgment calls a s
 Stated plainly, because a security tool that overclaims is worse than one that doesn't:
 
 - **Prompt-injection detection is a reference, not production-grade.** The shipped detector proves the plugin interface; it matches a small set of instruction-override heuristics and *will* miss real attacks. Treat it as an integration example.
-- **No OAuth for HTTP upstreams yet** (N2) — use a `${ENV_VAR}` bearer token.
 - **tollbooth governs tool traffic, not the LLM API itself.** It does not see or modify model completions.
 - **Non-tool MCP traffic** (resources, prompts) is proxied transparently but **not yet scanned** — a later milestone.
 - **Local, single-process.** No graphical UI and no hosted/multi-tenant deployment; tollbooth runs alongside the client.

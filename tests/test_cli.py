@@ -119,6 +119,27 @@ class TestAuthCli:
         assert code == 2
         assert "not an OAuth HTTP upstream" in capsys.readouterr().err
 
+    def test_validate_oauth_config_needs_no_token_or_network(
+        self, monkeypatch, capsys, oauth_config, tmp_path
+    ):
+        """N2: validate stays disk/env-independent — no token on disk required."""
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-xdg"))
+        code = run_cli(monkeypatch, "validate", "-c", str(oauth_config))
+        assert code == 0
+        assert "OK" in capsys.readouterr().out
+
+    def test_status_never_prints_token_values_sweep(
+        self, monkeypatch, capsys, oauth_config, tmp_path
+    ):
+        """N2 secret hygiene: status output never contains token values."""
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+        _seed_token("remote", access="AT-SENTINEL-XYZ", refresh="RT-SENTINEL-XYZ")
+        run_cli(monkeypatch, "auth", "status", "-c", str(oauth_config))
+        run_cli(monkeypatch, "auth", "logout", "remote")
+        combined = capsys.readouterr().out
+        assert "AT-SENTINEL-XYZ" not in combined
+        assert "RT-SENTINEL-XYZ" not in combined
+
 
 class TestValidate:
     def test_good_config_exits_zero(self, monkeypatch, capsys, good_config):

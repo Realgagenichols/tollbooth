@@ -211,3 +211,53 @@ class TestInteractiveLogin:
         assert stored.access_token in fake_oauth_server.state.issued_access_tokens
         # The registered client was persisted too (reused on re-login).
         assert (await FileTokenStorage("remote").get_client_info()) is not None
+
+
+class TestSecretHygiene:
+    async def test_sentinel_token_never_in_our_logs_or_errors(
+        self, fake_oauth_server, tmp_path, monkeypatch, caplog
+    ):
+        """N2: a sentinel refresh token used on the run path never appears in
+        tollbooth's logs or any raised error (it rides the wire to /token only)."""
+        import json as _json
+        import logging
+        from datetime import UTC, datetime
+
+        from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+        from tollbooth.config import HttpUpstreamConfig, OAuthConfig
+        from tollbooth.oauth import FileTokenStorage
+        from tollbooth.upstream import HttpUpstream
+
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+        _no_browser(monkeypatch)
+
+        sentinel = "rt-SENTINEL-DO-NOT-LOG"
+        fake_oauth_server.state.issued_refresh_tokens.add(sentinel)
+        store = FileTokenStorage("remote")
+        await store.set_client_info(
+            OAuthClientInformationFull(
+                client_id="c", redirect_uris=["http://127.0.0.1:8765/callback"]
+            )
+        )
+        await store.set_tokens(
+            OAuthToken(
+                access_token="at-x", token_type="Bearer", expires_in=1,
+                refresh_token=sentinel,
+            )
+        )
+        doc = _json.loads(store.path.read_text())
+        doc["obtained_at"] = datetime.fromtimestamp(0, UTC).isoformat()
+        store.path.write_text(_json.dumps(doc))
+        store.path.chmod(0o600)
+
+        upstream = HttpUpstream(
+            "remote",
+            HttpUpstreamConfig(url=fake_oauth_server.url, auth=OAuthConfig(type="oauth")),
+            init_timeout=15,
+        )
+        with caplog.at_level(logging.INFO, logger="tollbooth"):
+            await upstream.start()
+            await upstream.call_tool("echo", {"text": "hi"})
+            await upstream.aclose()
+        assert sentinel not in caplog.text
