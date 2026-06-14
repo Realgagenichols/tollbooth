@@ -89,3 +89,55 @@ def http_server():
         yield server
     finally:
         server.stop()
+
+
+class _FakeOAuthServer:
+    """A real uvicorn-served OAuth AS + protected MCP resource (N2 tests).
+
+    Binds the socket first so `base_url` is known before the app (which embeds
+    its own absolute endpoint URLs) is built. `.state` exposes counters/seeds.
+    """
+
+    def __init__(self):
+        import uvicorn
+
+        from tests.fake_oauth_server import FakeAuthState, build_fake_oauth_app
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        self.base_url = f"http://127.0.0.1:{port}"
+        self.url = f"{self.base_url}/mcp"
+        self.state = FakeAuthState()
+        self._server = uvicorn.Server(
+            uvicorn.Config(
+                build_fake_oauth_app(self.base_url, self.state),
+                host="127.0.0.1",
+                port=port,
+                log_level="warning",
+                lifespan="on",
+            )
+        )
+        self._thread = threading.Thread(
+            target=self._server.run, kwargs={"sockets": [sock]}, daemon=True
+        )
+        self._thread.start()
+        deadline = time.monotonic() + 10
+        while not self._server.started:
+            if time.monotonic() > deadline:  # pragma: no cover
+                raise RuntimeError("fake oauth server did not start within 10s")
+            time.sleep(0.02)
+
+    def stop(self):
+        self._server.should_exit = True
+        self._thread.join(timeout=5)
+
+
+@pytest.fixture
+def fake_oauth_server():
+    """Yield a running `_FakeOAuthServer` (`.url`, `.base_url`, `.state`)."""
+    server = _FakeOAuthServer()
+    try:
+        yield server
+    finally:
+        server.stop()
