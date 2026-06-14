@@ -5,7 +5,7 @@
 <p align="center">
   <a href="#"><img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white"></a>
   <a href="#"><img alt="Built on MCP" src="https://img.shields.io/badge/built%20on-MCP-58A6FF"></a>
-  <a href="#development"><img alt="319 tests" src="https://img.shields.io/badge/tests-319%20passing-3FB950"></a>
+  <a href="#development"><img alt="371 tests" src="https://img.shields.io/badge/tests-371%20passing-3FB950"></a>
   <a href="#design-decisions-that-matter"><img alt="Fail-closed by default" src="https://img.shields.io/badge/default-fail--closed-F85149"></a>
   <a href="https://github.com/Realgagenichols/tollbooth/blob/main/LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-8957E5"></a>
 </p>
@@ -349,7 +349,7 @@ Stack: the official `mcp` Python SDK, `pydantic`, and `pyyaml` — no other runt
 ## Development
 
 ```bash
-uv run pytest          # 319 tests, incl. a real-subprocess gateway E2E
+uv run pytest          # 371 tests, incl. real-subprocess gateway + OAuth E2E
 uv run ruff check .    # lint
 ```
 
