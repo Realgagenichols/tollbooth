@@ -320,3 +320,78 @@ class TestServerClassification:
         with pytest.raises(ConfigError) as excinfo:
             load_config(write_config(tmp_path, cfg))
         assert "ghp_httpsecret789" not in str(excinfo.value)
+
+
+class TestOAuthConfig:
+    """N2: the `auth` block on an HTTP upstream."""
+
+    def test_valid_auth_block_parses(self, tmp_path):
+        cfg = (
+            "servers:\n  remote:\n"
+            "    url: https://mcp.example.com/mcp\n"
+            "    auth:\n"
+            "      type: oauth\n"
+            "      scopes: [mcp:read, mcp:write]\n"
+            "      callback_port: 9999\n"
+        )
+        config = load_config(write_config(tmp_path, cfg))
+        remote = config.servers["remote"]
+        assert isinstance(remote, HttpUpstreamConfig)
+        assert remote.auth is not None
+        assert remote.auth.type == "oauth"
+        assert remote.auth.scopes == ["mcp:read", "mcp:write"]
+        assert remote.auth.callback_port == 9999
+
+    def test_auth_defaults(self, tmp_path):
+        cfg = (
+            "servers:\n  remote:\n"
+            "    url: https://mcp.example.com/mcp\n"
+            "    auth:\n      type: oauth\n"
+        )
+        remote = load_config(write_config(tmp_path, cfg)).servers["remote"]
+        assert remote.auth.scopes == []
+        assert remote.auth.callback_port == 8765
+
+    def test_absent_auth_is_none(self, tmp_path):
+        cfg = "servers:\n  remote:\n    url: https://mcp.example.com/mcp\n"
+        assert load_config(write_config(tmp_path, cfg)).servers["remote"].auth is None
+
+    def test_wrong_type_rejected(self, tmp_path):
+        cfg = (
+            "servers:\n  remote:\n"
+            "    url: https://mcp.example.com/mcp\n"
+            "    auth:\n      type: apikey\n"
+        )
+        with pytest.raises(ConfigError, match="remote.*type"):
+            load_config(write_config(tmp_path, cfg))
+
+    def test_non_list_scopes_rejected(self, tmp_path):
+        cfg = (
+            "servers:\n  remote:\n"
+            "    url: https://mcp.example.com/mcp\n"
+            "    auth:\n      type: oauth\n      scopes: mcp:read\n"
+        )
+        with pytest.raises(ConfigError, match="remote.*scopes"):
+            load_config(write_config(tmp_path, cfg))
+
+    def test_out_of_range_callback_port_rejected(self, tmp_path):
+        cfg = (
+            "servers:\n  remote:\n"
+            "    url: https://mcp.example.com/mcp\n"
+            "    auth:\n      type: oauth\n      callback_port: 70000\n"
+        )
+        with pytest.raises(ConfigError, match="remote.*callback_port"):
+            load_config(write_config(tmp_path, cfg))
+
+    def test_auth_error_names_server_without_echoing_header_secret(self, tmp_path):
+        """A bad auth block beside a secret header must not leak the header."""
+        cfg = (
+            "servers:\n  remote:\n"
+            "    url: https://mcp.example.com/mcp\n"
+            "    headers:\n      X-Api-Key: sk_secret_value_123\n"
+            "    auth:\n      type: apikey\n"
+        )
+        with pytest.raises(ConfigError) as excinfo:
+            load_config(write_config(tmp_path, cfg))
+        assert "remote" in str(excinfo.value)
+        assert "sk_secret_value_123" not in str(excinfo.value)

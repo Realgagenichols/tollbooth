@@ -10,7 +10,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from tollbooth.dlp import PATTERN_IDS
 from tollbooth.policy import Decision, Rule
@@ -69,6 +69,27 @@ def expand_env_refs(value: str, env: Mapping[str, str]) -> str:
     return _ENV_REF.sub(_replace, value)
 
 
+# The default loopback port for the OAuth redirect (N2). Registered as the exact
+# redirect_uri during dynamic client registration; overridable per server.
+DEFAULT_OAUTH_CALLBACK_PORT = 8765
+
+
+class OAuthConfig(BaseModel):
+    """OAuth 2.0 authentication for an HTTP upstream (N2).
+
+    Declaring this block opts the server into the SDK's `OAuthClientProvider`
+    flow (auth-code + PKCE, on-disk token store). Only the shape is validated
+    here; token presence is runtime state checked at upstream startup, so
+    `tollbooth validate` stays disk- and environment-independent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["oauth"]
+    scopes: list[str] = []
+    callback_port: int = Field(default=DEFAULT_OAUTH_CALLBACK_PORT, ge=1, le=65535)
+
+
 class HttpUpstreamConfig(BaseModel):
     """Connection spec for one upstream streamable-HTTP MCP server (N1)."""
 
@@ -76,6 +97,7 @@ class HttpUpstreamConfig(BaseModel):
 
     url: str
     headers: dict[str, str] = {}
+    auth: OAuthConfig | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> "HttpUpstreamConfig":
