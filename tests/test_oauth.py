@@ -274,3 +274,22 @@ class TestProviderFactory:
             await _failclosed_redirect("https://auth.example/authorize")
         with pytest.raises(FailClosedReauth):
             await _failclosed_callback()
+
+    async def test_token_expiry_computed_from_obtained_at(self):
+        store = FileTokenStorage("remote")
+        await store.set_tokens(_token())  # expires_in=3600
+        expiry = store.token_expiry()
+        assert expiry is not None
+        assert abs(expiry - (time.time() + 3600)) < 60
+
+    async def test_token_expiry_none_without_token(self):
+        assert FileTokenStorage("nobody").token_expiry() is None
+
+    async def test_provider_restores_token_expiry(self):
+        store = FileTokenStorage("remote")
+        await store.set_tokens(_token())
+        provider = build_oauth_provider(
+            "remote", "https://mcp.example.com/mcp", OAuthConfig(type="oauth"),
+            interactive=False,
+        )
+        assert provider.context.token_expiry_time is not None

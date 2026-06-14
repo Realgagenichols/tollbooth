@@ -226,6 +226,25 @@ class FileTokenStorage:
         except FileNotFoundError:
             return False
 
+    def token_expiry(self) -> float | None:
+        """Absolute epoch when the stored access token expires, or None if
+        unknown. The SDK drops expiry on load (it only restores the token
+        value), so we recompute it from our `obtained_at` + `expires_in` and
+        re-seat it on the provider — otherwise an expired disk token looks
+        valid and gets sent instead of refreshed (N2)."""
+        stored = self._load()
+        if (
+            stored.tokens is None
+            or stored.tokens.expires_in is None
+            or stored.obtained_at is None
+        ):
+            return None
+        try:
+            obtained = datetime.fromisoformat(stored.obtained_at)
+        except ValueError:
+            return None
+        return obtained.timestamp() + stored.tokens.expires_in
+
     def describe(self) -> dict[str, object] | None:
         """Non-secret summary for `auth status`: presence + obtained_at +
         relative `expires_in`. NEVER returns token values."""
@@ -369,10 +388,19 @@ def build_oauth_provider(
         redirect_handler, callback_handler = handlers.redirect, handlers.callback
     else:
         redirect_handler, callback_handler = _failclosed_redirect, _failclosed_callback
-    return OAuthClientProvider(
+    provider = OAuthClientProvider(
         server_url=http_url,
         client_metadata=metadata,
         storage=storage,
         redirect_handler=redirect_handler,
         callback_handler=callback_handler,
     )
+    # Re-seat the expiry the SDK doesn't persist across loads (see
+    # FileTokenStorage.token_expiry): a still-valid token is sent, an expired
+    # one is refreshed, and an unrefreshable one fails closed — none are sent
+    # blindly as if valid. `_initialize` later loads the token value but leaves
+    # token_expiry_time untouched, so this survives.
+    expiry = storage.token_expiry()
+    if expiry is not None:
+        provider.context.token_expiry_time = expiry
+    return provider
