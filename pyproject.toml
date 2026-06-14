@@ -28,7 +28,11 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "mcp>=1.27.2",
+    # Capped to the tested minor: N2 OAuth relies on mcp-SDK internals
+    # (OAuthClientProvider.context.token_expiry_time, the _refresh_token /token
+    # fallback). Raising this cap requires re-running the OAuth canary +
+    # silent-refresh integration tests first (see CLAUDE.md → Releasing).
+    "mcp>=1.27.2,<1.28",
     "pydantic>=2.13.4",
     "pyyaml>=6.0.3",
 ]

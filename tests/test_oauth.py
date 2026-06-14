@@ -293,3 +293,21 @@ class TestProviderFactory:
             interactive=False,
         )
         assert provider.context.token_expiry_time is not None
+
+    async def test_sdk_token_expiry_seam_still_exists(self):
+        """Canary: N2 re-seats provider.context.token_expiry_time because the
+        SDK drops expiry on load. If an `mcp` upgrade removes this seam, fail
+        loudly HERE (at dependency-bump time) rather than silently losing
+        unattended refresh. If this breaks, re-verify build_oauth_provider and
+        the silent-refresh integration test against the new SDK."""
+        provider = build_oauth_provider(
+            "remote", "https://mcp.example.com/mcp", OAuthConfig(type="oauth"),
+            interactive=False,
+        )
+        assert hasattr(provider, "context"), "OAuthClientProvider.context removed"
+        assert hasattr(provider.context, "token_expiry_time"), (
+            "OAuthContext.token_expiry_time removed/renamed — N2 refresh seam broke"
+        )
+        assert hasattr(provider.context, "is_token_valid"), (
+            "OAuthContext.is_token_valid removed — refresh/validity logic changed"
+        )
