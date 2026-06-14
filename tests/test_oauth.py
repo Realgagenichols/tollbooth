@@ -1,12 +1,29 @@
 """Tests for N2 OAuth: token storage, handlers, provider factory."""
 
+import contextlib
 import json
+import socket
 import stat
+import threading
+import time
+import urllib.error
+import urllib.request
 
 import pytest
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
-from tollbooth.oauth import FileTokenStorage, TokenStorageError, oauth_storage_dir
+from tollbooth.config import OAuthConfig
+from tollbooth.oauth import (
+    FailClosedReauth,
+    FileTokenStorage,
+    OAuthFlowError,
+    TokenStorageError,
+    _failclosed_callback,
+    _failclosed_redirect,
+    _serve_loopback_callback,
+    build_oauth_provider,
+    oauth_storage_dir,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -152,3 +169,93 @@ class TestStorageSecretHygiene:
 def test_storage_dir_honors_xdg(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "custom"))
     assert oauth_storage_dir() == tmp_path / "custom" / "tollbooth" / "oauth"
+
+
+def _free_port() -> int:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _fire(url: str, delay: float = 0.2) -> None:
+    """Hit the loopback callback from a daemon thread after a short delay, so
+    the awaited `_serve_loopback_callback` can propagate its own exception
+    cleanly (no task-group ExceptionGroup wrapping)."""
+
+    def _bg() -> None:
+        time.sleep(delay)
+        with contextlib.suppress(urllib.error.HTTPError, OSError):
+            urllib.request.urlopen(url, timeout=5).close()
+
+    threading.Thread(target=_bg, daemon=True).start()
+
+
+class TestLoopbackCallback:
+    async def test_returns_code_on_matching_state(self):
+        port = _free_port()
+        _fire(f"http://127.0.0.1:{port}/callback?code=the-code&state=xyz")
+        code, state = await _serve_loopback_callback("xyz", port, timeout=5)
+        assert code == "the-code"
+        assert state == "xyz"
+
+    async def test_state_mismatch_rejected_without_returning_code(self):
+        port = _free_port()
+        _fire(f"http://127.0.0.1:{port}/callback?code=the-code&state=WRONG")
+        with pytest.raises(OAuthFlowError, match="state mismatch"):
+            await _serve_loopback_callback("xyz", port, timeout=5)
+
+    async def test_missing_code_rejected(self):
+        port = _free_port()
+        _fire(f"http://127.0.0.1:{port}/callback?state=xyz")
+        with pytest.raises(OAuthFlowError, match="missing authorization code"):
+            await _serve_loopback_callback("xyz", port, timeout=5)
+
+    async def test_times_out_when_no_redirect(self):
+        port = _free_port()
+        with pytest.raises(OAuthFlowError, match="timed out"):
+            await _serve_loopback_callback("xyz", port, timeout=0.5)
+
+    async def test_code_value_never_in_error_message(self):
+        port = _free_port()
+        _fire(f"http://127.0.0.1:{port}/callback?code=secret-code&state=BAD")
+        with pytest.raises(OAuthFlowError) as excinfo:
+            await _serve_loopback_callback("xyz", port, timeout=5)
+        assert "secret-code" not in str(excinfo.value)
+
+
+class TestProviderFactory:
+    async def test_run_mode_wires_failclosed_and_strict_storage(self):
+        provider = build_oauth_provider(
+            "remote", "https://mcp.example.com/mcp", OAuthConfig(type="oauth"),
+            interactive=False,
+        )
+        assert provider.context.redirect_handler is _failclosed_redirect
+        assert provider.context.callback_handler is _failclosed_callback
+        assert provider.context.storage.strict is True
+
+    async def test_interactive_mode_wires_real_handlers_and_lenient_storage(self):
+        provider = build_oauth_provider(
+            "remote", "https://mcp.example.com/mcp",
+            OAuthConfig(type="oauth", callback_port=9100), interactive=True,
+        )
+        assert provider.context.redirect_handler is not _failclosed_redirect
+        assert provider.context.storage.strict is False
+        assert str(provider.context.client_metadata.redirect_uris[0]) == (
+            "http://127.0.0.1:9100/callback"
+        )
+
+    async def test_scopes_joined_into_metadata(self):
+        provider = build_oauth_provider(
+            "remote", "https://mcp.example.com/mcp",
+            OAuthConfig(type="oauth", scopes=["mcp:read", "mcp:write"]),
+            interactive=False,
+        )
+        assert provider.context.client_metadata.scope == "mcp:read mcp:write"
+
+    async def test_failclosed_handlers_raise(self):
+        with pytest.raises(FailClosedReauth):
+            await _failclosed_redirect("https://auth.example/authorize")
+        with pytest.raises(FailClosedReauth):
+            await _failclosed_callback()
