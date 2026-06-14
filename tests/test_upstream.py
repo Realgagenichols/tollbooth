@@ -135,6 +135,34 @@ async def test_http_header_env_expansion(http_server, monkeypatch):
         await upstream.aclose()
 
 
+async def test_oauth_valid_token_sends_bearer_no_browser(http_server, tmp_path, monkeypatch):
+    """N2: a valid stored token rides along as a bearer with no browser flow."""
+    from mcp.shared.auth import OAuthToken
+
+    from tollbooth import oauth
+    from tollbooth.config import HttpUpstreamConfig, OAuthConfig
+    from tollbooth.oauth import FileTokenStorage
+    from tollbooth.upstream import HttpUpstream
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    # Any browser attempt must fail the test — run mode must never open one.
+    monkeypatch.setattr(
+        oauth.webbrowser, "open", lambda *a, **k: pytest.fail("browser opened")
+    )
+    store = FileTokenStorage("remote")
+    await store.set_tokens(
+        OAuthToken(access_token="valid-tok-123", token_type="Bearer", expires_in=3600)
+    )
+    config = HttpUpstreamConfig(url=http_server.url, auth=OAuthConfig(type="oauth"))
+    upstream = HttpUpstream("remote", config)
+    try:
+        await upstream.start()
+        result = await upstream.call_tool("echo_header", {"name": "authorization"})
+        assert result.content[0].text == "Bearer valid-tok-123"
+    finally:
+        await upstream.aclose()
+
+
 async def test_http_missing_env_var_fails_closed_without_echo(http_server, monkeypatch):
     """N1: an unset ${VAR} fails closed naming server + var, never the value."""
     from tollbooth.upstream import HttpUpstream

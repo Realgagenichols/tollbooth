@@ -25,6 +25,7 @@ from tollbooth.config import (
     UpstreamConfig,
     expand_env_refs,
 )
+from tollbooth.oauth import FailClosedReauth, TokenStorageError, build_oauth_provider
 
 log = logging.getLogger(__name__)
 
@@ -262,6 +263,14 @@ class HttpUpstream:
                     f"upstream {self.name!r} did not finish initializing within "
                     f"{self.init_timeout:.0f}s ({origin})"
                 ) from err
+            if isinstance(err, FailClosedReauth):
+                raise self._reauth_error() from err
+            if isinstance(err, TokenStorageError):
+                # TokenStorageError messages are already sanitized (path/reason,
+                # never contents), so they're safe to surface verbatim.
+                raise UpstreamError(
+                    f"upstream {self.name!r} OAuth store unusable ({origin}): {err}"
+                ) from err
             # Origin + exception TYPE only: the raw URL may carry credentials and
             # transport exceptions can echo headers/URLs (Pattern 11).
             raise UpstreamError(
@@ -277,9 +286,18 @@ class HttpUpstream:
             # `requests` is the outermost context so req_recv is always closed,
             # even on an init-failure exit before the serve loop.
             async with requests, AsyncExitStack() as stack:
+                # OAuth (N2): attach the SDK provider as the httpx auth. It drives
+                # auth-code+PKCE/refresh; in run mode its handlers fail closed, so
+                # a missing/unrefreshable token raises FailClosedReauth (below)
+                # instead of opening a browser.
+                auth = None
+                if self.config.auth is not None:
+                    auth = build_oauth_provider(
+                        self.name, self.config.url, self.config.auth, interactive=False
+                    )
                 # We own the httpx client (configured with headers), so we manage
                 # its lifecycle here; streamable_http_client won't when supplied.
-                client = create_mcp_http_client(headers=headers or None)
+                client = create_mcp_http_client(headers=headers or None, auth=auth)
                 await stack.enter_async_context(client)
                 read, write, _ = await stack.enter_async_context(
                     streamable_http_client(self.config.url, http_client=client)
@@ -358,7 +376,18 @@ class HttpUpstream:
                 f"upstream {self.name!r} {method} failed "
                 f"({_url_origin(self.config.url)}: transport closed)"
             )
+        if isinstance(payload, FailClosedReauth):
+            # A token valid at startup expired mid-session and couldn't refresh.
+            raise self._reauth_error() from payload
         raise self._transport_error(method, payload) from payload  # type: ignore[arg-type]
+
+    def _reauth_error(self) -> UpstreamError:
+        """Clean fail-closed error for an OAuth upstream needing re-auth — origin
+        only, with the recovery command, never any token detail (N2)."""
+        return UpstreamError(
+            f"upstream {self.name!r} requires OAuth authentication "
+            f"({_url_origin(self.config.url)}); run `tollbooth auth login {self.name}`"
+        )
 
     async def list_tools(self) -> list[types.Tool]:
         return await self._invoke("list_tools")  # type: ignore[return-value]
