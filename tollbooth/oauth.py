@@ -17,6 +17,7 @@ secrets never appear in logs or error messages.
 import json
 import logging
 import os
+import stat
 import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
@@ -64,14 +65,24 @@ class FileTokenStorage:
         self._path = self._safe_path(server_name)
 
     def _safe_path(self, server_name: str) -> Path:
-        """`<dir>/<server>.json`, guarding against path traversal in the name."""
-        path = (self._dir / f"{server_name}.json").resolve()
-        if path.parent != self._dir.resolve():
+        """`<dir>/<server>.json`, guarding against path traversal in the name.
+
+        The name must be a single path component (no separators, not `.`/`..`)
+        so the result is always directly inside the oauth dir. We do NOT
+        `.resolve()` the file — that would follow a planted symlink, defeating
+        the lstat symlink check in `_check_perms`.
+        """
+        if (
+            not server_name
+            or server_name in (".", "..")
+            or os.sep in server_name
+            or (os.altsep and os.altsep in server_name)
+        ):
             # The name is config, not a secret — naming it is what's actionable.
             raise TokenStorageError(
                 f"server name {server_name!r} is not a valid credential filename"
             )
-        return path
+        return self._dir / f"{server_name}.json"
 
     @property
     def path(self) -> Path:
@@ -142,9 +153,14 @@ class FileTokenStorage:
             return _Stored()
 
     def _check_perms(self) -> None:
-        """Reject a store readable/writable by group or other (Pattern 13)."""
+        """Reject an untrusted store (Pattern 13): a symlink (we only trust a
+        file we wrote in place), or anything readable/writable by group/other.
+        `lstat` so a symlink is judged on its own, not its target."""
         for target in (self._path, self._dir):
-            mode = target.stat().st_mode & 0o777
+            st = target.lstat()
+            if stat.S_ISLNK(st.st_mode):
+                raise TokenStorageError(f"{target} is a symlink — not trusted")
+            mode = stat.S_IMODE(st.st_mode)
             if mode & 0o077:
                 raise TokenStorageError(
                     f"{target} has insecure permissions {oct(mode)} "

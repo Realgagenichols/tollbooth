@@ -87,6 +87,28 @@ class TestStorageRejection:
         lenient = FileTokenStorage("remote", strict=False)
         assert await lenient.get_tokens() is None  # treated as absent
 
+    async def test_loose_dir_permissions_rejected_in_strict_mode(self):
+        store = FileTokenStorage("remote")
+        await store.set_tokens(_token())
+        store.path.parent.chmod(0o755)
+        try:
+            with pytest.raises(TokenStorageError, match="insecure permissions"):
+                await store.get_tokens()
+        finally:
+            store.path.parent.chmod(0o700)
+
+    async def test_symlink_store_rejected_in_strict_mode(self, tmp_path):
+        store = FileTokenStorage("remote")
+        await store.set_tokens(_token())
+        # Replace the real file with a symlink to a 0600 file elsewhere.
+        target = tmp_path / "elsewhere.json"
+        target.write_text(store.path.read_text())
+        target.chmod(0o600)
+        store.path.unlink()
+        store.path.symlink_to(target)
+        with pytest.raises(TokenStorageError, match="symlink"):
+            await store.get_tokens()
+
     async def test_malformed_json_rejected_in_strict_mode(self):
         store = FileTokenStorage("remote")
         await store.set_tokens(_token())  # establishes the dir at 0700
