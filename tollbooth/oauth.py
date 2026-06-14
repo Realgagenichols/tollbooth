@@ -274,6 +274,9 @@ async def _serve_loopback_callback(
             if not code:
                 result["error"] = "missing authorization code"
             elif expected_state is None or state != expected_state:
+                # Fail closed on a missing/mismatched state — and also when we
+                # have no expected_state yet (callback before redirect): never
+                # accept an unverifiable state (CSRF).
                 result["error"] = "state mismatch (possible CSRF)"
             else:
                 result["code"] = code
@@ -355,6 +358,7 @@ def build_oauth_provider(
     metadata = OAuthClientMetadata(
         redirect_uris=[redirect_uri],
         client_name="tollbooth",
+        # Empty scopes list → an unscoped request (None), per OAuth.
         scope=" ".join(config.scopes) if config.scopes else None,
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],

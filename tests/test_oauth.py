@@ -217,6 +217,21 @@ class TestLoopbackCallback:
         with pytest.raises(OAuthFlowError, match="timed out"):
             await _serve_loopback_callback("xyz", port, timeout=0.5)
 
+    async def test_no_expected_state_rejects_fail_closed(self):
+        # Callback invoked before a state was captured (None) must reject, never
+        # accept an unverifiable redirect.
+        port = _free_port()
+        _fire(f"http://127.0.0.1:{port}/callback?code=c&state=anything")
+        with pytest.raises(OAuthFlowError, match="state mismatch"):
+            await _serve_loopback_callback(None, port, timeout=5)
+
+    async def test_non_callback_path_ignored(self):
+        # A stray GET (favicon, probe) gets 404 and does NOT complete the flow.
+        port = _free_port()
+        _fire(f"http://127.0.0.1:{port}/favicon.ico")
+        with pytest.raises(OAuthFlowError, match="timed out"):
+            await _serve_loopback_callback("xyz", port, timeout=1.5)
+
     async def test_code_value_never_in_error_message(self):
         port = _free_port()
         _fire(f"http://127.0.0.1:{port}/callback?code=secret-code&state=BAD")
