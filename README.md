@@ -332,7 +332,8 @@ Stated plainly, because a security tool that overclaims is worse than one that d
 
 | Module | Responsibility |
 |--------|---------------|
-| `main` | CLI: `run`, `emit-config`, `validate`, `import`, `audit verify\|query\|replay`, `hook pre\|post` |
+| `main` | CLI: `run`, `emit-config`, `validate`, `import`, `audit verify\|query\|replay`, `hook pre\|post`, `auth login\|status\|logout` |
+| `oauth` | OAuth for HTTP upstreams (N2): on-disk token store (0600), loopback callback, fail-closed/interactive provider |
 | `config` | Load + pydantic-validate `tollbooth.yaml`; emit/import client config |
 | `proxy` | Client-facing MCP server; tool aggregation + namespacing; routes through the pipeline |
 | `upstream` | `UpstreamTransport` interface + `StdioUpstream` / `HttpUpstream` (supervised); `build_upstream` factory |
