@@ -404,3 +404,25 @@ def build_oauth_provider(
     if expiry is not None:
         provider.context.token_expiry_time = expiry
     return provider
+
+
+async def perform_login(server_name: str, http_url: str, config: OAuthConfig) -> None:
+    """Drive the interactive auth-code+PKCE flow to completion (`auth login`).
+
+    Connects exactly as the gateway does (streamable HTTP + initialize), so a
+    successful return proves the obtained token works. The SDK persists the
+    tokens during the flow; the loopback callback enforces its own timeout, so
+    we don't wrap this in one (the user may take a while in the browser).
+    """
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+    from mcp.shared._httpx_utils import create_mcp_http_client
+
+    provider = build_oauth_provider(server_name, http_url, config, interactive=True)
+    client = create_mcp_http_client(auth=provider)
+    async with (
+        client,
+        streamable_http_client(http_url, http_client=client) as (read, write, _),
+        ClientSession(read, write) as session,
+    ):
+        await session.initialize()

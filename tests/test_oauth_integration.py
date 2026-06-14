@@ -3,12 +3,42 @@
 Drives the SDK's OAuthClientProvider end-to-end over HTTP (no flow mocking).
 """
 
+import contextlib
+import socket
+import threading
+import time
 import urllib.error
 import urllib.request
 
 import pytest
 
 pytestmark = pytest.mark.anyio
+
+
+def _free_port() -> int:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _simulate_browser(monkeypatch, delay=0.3):
+    """Replace webbrowser.open with a thread that GETs the authorize URL and
+    follows the 302 to the loopback callback — the test's stand-in for a user
+    approving in a browser. The delay lets the loopback server bind first."""
+    from tollbooth import oauth
+
+    def _open(url, *a, **k):
+        def _bg():
+            time.sleep(delay)
+            with contextlib.suppress(Exception):
+                urllib.request.urlopen(url, timeout=5).close()
+
+        threading.Thread(target=_bg, daemon=True).start()
+        return True
+
+    monkeypatch.setattr(oauth.webbrowser, "open", _open)
 
 
 def _get_json(url: str):
@@ -160,3 +190,24 @@ class TestRunMode:
         refreshed = await FileTokenStorage("remote").get_tokens()
         assert refreshed.access_token != "at-expired"
         assert refreshed.access_token in fake_oauth_server.state.issued_access_tokens
+
+
+class TestInteractiveLogin:
+    async def test_login_persists_token(self, fake_oauth_server, tmp_path, monkeypatch):
+        """N2: `auth login` completes the auth-code+PKCE flow via the loopback
+        callback and persists a working token."""
+        from tollbooth.config import OAuthConfig
+        from tollbooth.oauth import FileTokenStorage, perform_login
+
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+        _simulate_browser(monkeypatch)
+
+        config = OAuthConfig(type="oauth", callback_port=_free_port())
+        await perform_login("remote", fake_oauth_server.url, config)
+
+        assert fake_oauth_server.state.code_grants == 1
+        stored = await FileTokenStorage("remote").get_tokens()
+        assert stored is not None
+        assert stored.access_token in fake_oauth_server.state.issued_access_tokens
+        # The registered client was persisted too (reused on re-login).
+        assert (await FileTokenStorage("remote").get_client_info()) is not None

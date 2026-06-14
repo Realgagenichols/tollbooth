@@ -43,6 +43,83 @@ def bad_config(tmp_path):
     return path
 
 
+OAUTH_CONFIG = """
+servers:
+  remote:
+    url: https://mcp.example.com/mcp
+    auth:
+      type: oauth
+"""
+
+
+@pytest.fixture
+def oauth_config(tmp_path):
+    path = tmp_path / "tollbooth.yaml"
+    path.write_text(OAUTH_CONFIG, encoding="utf-8")
+    return path
+
+
+def _seed_token(name, access="SECRET-AT", refresh="SECRET-RT"):
+    import anyio
+    from mcp.shared.auth import OAuthToken
+
+    from tollbooth.oauth import FileTokenStorage
+
+    async def _seed():
+        await FileTokenStorage(name).set_tokens(
+            OAuthToken(
+                access_token=access, token_type="Bearer", expires_in=3600,
+                refresh_token=refresh,
+            )
+        )
+
+    anyio.run(_seed)
+
+
+class TestAuthCli:
+    def test_status_reports_not_authenticated(self, monkeypatch, capsys, oauth_config, tmp_path):
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+        code = run_cli(monkeypatch, "auth", "status", "-c", str(oauth_config))
+        assert code == 0
+        assert "not authenticated" in capsys.readouterr().out
+
+    def test_status_lists_stored_token_without_values(
+        self, monkeypatch, capsys, oauth_config, tmp_path
+    ):
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+        _seed_token("remote")
+        code = run_cli(monkeypatch, "auth", "status", "-c", str(oauth_config))
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "token stored" in out
+        assert "SECRET-AT" not in out and "SECRET-RT" not in out
+
+    def test_status_no_oauth_servers(self, monkeypatch, capsys, good_config, tmp_path):
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+        code = run_cli(monkeypatch, "auth", "status", "-c", str(good_config))
+        assert code == 0
+        assert "No OAuth-configured upstreams" in capsys.readouterr().out
+
+    def test_logout_removes_then_reports_absent(self, monkeypatch, capsys, tmp_path):
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+        _seed_token("remote")
+        code = run_cli(monkeypatch, "auth", "logout", "remote")
+        assert code == 0
+        assert "removed" in capsys.readouterr().out
+        run_cli(monkeypatch, "auth", "logout", "remote")
+        assert "no stored credentials" in capsys.readouterr().out
+
+    def test_login_unknown_server_errors(self, monkeypatch, capsys, oauth_config):
+        code = run_cli(monkeypatch, "auth", "login", "ghost", "-c", str(oauth_config))
+        assert code == 2
+        assert "no server named 'ghost'" in capsys.readouterr().err
+
+    def test_login_non_oauth_server_errors(self, monkeypatch, capsys, good_config):
+        code = run_cli(monkeypatch, "auth", "login", "fs", "-c", str(good_config))
+        assert code == 2
+        assert "not an OAuth HTTP upstream" in capsys.readouterr().err
+
+
 class TestValidate:
     def test_good_config_exits_zero(self, monkeypatch, capsys, good_config):
         code = run_cli(monkeypatch, "validate", "-c", str(good_config))

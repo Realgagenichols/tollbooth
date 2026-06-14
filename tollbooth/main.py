@@ -26,12 +26,18 @@ from tollbooth.audit import (
 from tollbooth.config import (
     ConfigError,
     GatewayConfig,
+    HttpUpstreamConfig,
     emit_client_config,
     import_client_config,
     load_config,
     render_starter_yaml,
 )
 from tollbooth.hook import emit_hooks_config, run_hook
+from tollbooth.oauth import (
+    FileTokenStorage,
+    OAuthFlowError,
+    perform_login,
+)
 from tollbooth.pipeline import Pipeline
 from tollbooth.plugins import build_interceptors, load_plugins
 from tollbooth.proxy import Gateway
@@ -121,6 +127,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     replay_parser.add_argument("session", help="Session id to replay")
     replay_parser.add_argument("--log", required=True, help="Path to the audit JSONL log")
+
+    auth_parser = subparsers.add_parser(
+        "auth", help="Manage OAuth credentials for HTTP upstreams (N2)"
+    )
+    auth_sub = auth_parser.add_subparsers(dest="auth_command", required=True)
+
+    login_parser = auth_sub.add_parser(
+        "login", help="Interactively authenticate an OAuth HTTP upstream (browser)"
+    )
+    login_parser.add_argument("server", help="Server name declared in the config")
+    login_parser.add_argument("-c", "--config", required=True, help="Path to tollbooth.yaml")
+
+    status_parser = auth_sub.add_parser(
+        "status", help="Show stored OAuth credential status (never token values)"
+    )
+    status_parser.add_argument("-c", "--config", required=True, help="Path to tollbooth.yaml")
+
+    logout_parser = auth_sub.add_parser(
+        "logout", help="Delete stored OAuth credentials for a server"
+    )
+    logout_parser.add_argument("server", help="Server name")
 
     return parser
 
@@ -317,6 +344,67 @@ def cmd_audit_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _oauth_upstream(config: GatewayConfig, server: str) -> HttpUpstreamConfig:
+    """Resolve an OAuth-configured HTTP upstream by name, or raise ConfigError."""
+    spec = config.servers.get(server)
+    if spec is None:
+        raise ConfigError(f"no server named {server!r} in the config")
+    if not isinstance(spec, HttpUpstreamConfig) or spec.auth is None:
+        raise ConfigError(f"server {server!r} is not an OAuth HTTP upstream")
+    return spec
+
+
+def cmd_auth_login(server: str, config_path: str) -> int:
+    config = load_config(config_path)
+    spec = _oauth_upstream(config, server)
+    try:
+        anyio.run(perform_login, server, spec.url, spec.auth)
+    except OAuthFlowError as exc:
+        # OAuthFlowError messages are sanitized (no codes/tokens) — safe to show.
+        print(f"tollbooth: login failed for {server!r}: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - type only; never echo a raw error
+        print(
+            f"tollbooth: login failed for {server!r} ({type(exc).__name__})",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"tollbooth: authenticated {server!r}; token stored.")
+    return 0
+
+
+def cmd_auth_status(config_path: str) -> int:
+    config = load_config(config_path)
+    oauth_servers = [
+        name
+        for name, spec in config.servers.items()
+        if isinstance(spec, HttpUpstreamConfig) and spec.auth is not None
+    ]
+    if not oauth_servers:
+        print("No OAuth-configured upstreams.")
+        return 0
+    for name in oauth_servers:
+        info = FileTokenStorage(name, strict=False).describe()
+        if info is None:
+            print(f"{name}: not authenticated (run `tollbooth auth login {name}`)")
+        else:
+            refresh = "yes" if info["has_refresh_token"] else "no"
+            print(
+                f"{name}: token stored (obtained {info['obtained_at']}, "
+                f"expires_in {info['expires_in']}s, refresh: {refresh})"
+            )
+    return 0
+
+
+def cmd_auth_logout(server: str) -> int:
+    removed = FileTokenStorage(server, strict=False).delete()
+    if removed:
+        print(f"tollbooth: removed stored credentials for {server!r}.")
+    else:
+        print(f"tollbooth: no stored credentials for {server!r}.")
+    return 0
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -344,6 +432,13 @@ def main() -> None:
                 "replay": cmd_audit_replay,
             }
             code = audit_commands[args.audit_command](args)
+        elif args.command == "auth":
+            auth_commands = {
+                "login": lambda a: cmd_auth_login(a.server, a.config),
+                "status": lambda a: cmd_auth_status(a.config),
+                "logout": lambda a: cmd_auth_logout(a.server),
+            }
+            code = auth_commands[args.auth_command](args)
         else:
             commands = {"run": cmd_run, "validate": cmd_validate}
             code = commands[args.command](args.config)
