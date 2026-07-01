@@ -27,13 +27,13 @@ class TestRuleMatching:
                 action="deny",
                 server="fs",
                 tool="write_file",
-                where={"path": Matcher(not_prefix="/Users/gage/proj")},
+                where={"path": Matcher(not_prefix="/Users/me/proj")},
             )
         ]
         denied = evaluate("fs", "write_file", {"path": "/etc/passwd"}, rules, Decision.ALLOW)
         assert denied.decision is Decision.DENY
         allowed = evaluate(
-            "fs", "write_file", {"path": "/Users/gage/proj/a.txt"}, rules, Decision.ALLOW
+            "fs", "write_file", {"path": "/Users/me/proj/a.txt"}, rules, Decision.ALLOW
         )
         assert allowed.decision is Decision.ALLOW
         assert allowed.rule_name is None
