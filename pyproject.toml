@@ -1,12 +1,12 @@
 [project]
 name = "mcp-tollbooth"
-version = "0.2.0"
+version = "0.2.1"
 description = "A security gateway for AI agents: a transparent MCP proxy that enforces policy, DLP, and audit on every tool call and result."
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 readme = "README.md"
-authors = [{ name = "Gage Nichols", email = "gagetnichols@icloud.com" }]
+authors = [{ name = "Gage Nichols", email = "gage@hiregage.com" }]
 keywords = [
     "mcp",
     "model-context-protocol",
